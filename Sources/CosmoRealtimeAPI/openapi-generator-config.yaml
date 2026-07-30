@@ -1,0 +1,7 @@
+generate:
+  - types
+  - client
+accessModifier: public
+# Same naming strategy as the legacy ``CosmoRealtime`` target — see the
+# rationale in ``Sources/CosmoRealtime/openapi-generator-config.yaml``.
+namingStrategy: idiomatic
