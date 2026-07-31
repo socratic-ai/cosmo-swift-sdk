@@ -20,15 +20,40 @@ struct MicPrewarmCoordinatorTests {
         func record(_ enabled: Bool) { applied.append(enabled) }
     }
 
+    /// Releases *every* waiter, now and later, and stays open. The coordinator's
+    /// queue is process-global, so a concurrent suite's release runs through the
+    /// same swapped-in transition; a gate that hands out one wakeup strands the
+    /// next caller, and one stranded transition wedges the chain — and with it
+    /// every later `settle()` — for the rest of the process.
+    @MainActor
+    private final class Latch {
+        private var isOpen = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func wait() async {
+            guard !isOpen else { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+
+        func open() {
+            guard !isOpen else { return }
+            isOpen = true
+            let pending = waiters
+            waiters = []
+            for waiter in pending { waiter.resume() }
+        }
+    }
+
     @Test("settle suspends until the queued transition has applied")
     func settleSuspendsUntilApplied() async {
         let recorder = Recorder()
-        let (gate, gateContinuation) = AsyncStream.makeStream(of: Void.self)
+        let entered = Latch()
+        let release = Latch()
         let original = MicPrewarmCoordinator.transition
         defer { MicPrewarmCoordinator.transition = original }
         MicPrewarmCoordinator.transition = { enabled in
-            var opened = gate.makeAsyncIterator()
-            await opened.next()
+            entered.open()
+            await release.wait()
             recorder.record(enabled)
         }
 
@@ -37,7 +62,11 @@ struct MicPrewarmCoordinatorTests {
             await MicPrewarmCoordinator.settle()
             return recorder.applied
         }
-        gateContinuation.yield()
+        // Nothing can have been applied yet: every transition is parked on
+        // `release`, so the snapshot below is ordered by the latch rather than
+        // by how long anything took to run.
+        await entered.wait()
+        release.open()
 
         #expect(await appliedWhenSettled.value.contains(false))
     }

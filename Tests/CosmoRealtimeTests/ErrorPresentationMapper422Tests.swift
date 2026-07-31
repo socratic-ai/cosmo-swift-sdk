@@ -38,7 +38,10 @@ import Testing
         let presentation = ErrorPresentationMapper.presentation(
             VoiceClientError.handshakeFailed(status: 500, body: nil)
         )
-        #expect(presentation.headline == "Couldn't authenticate (HTTP 500)")
+        #expect(presentation.headline == "Couldn't authenticate")
+        // The status still reaches the user, in the body rather than the
+        // headline — the notch error card lays the headline out on one row.
+        #expect(presentation.message.contains("HTTP 500"))
         #expect(presentation.kind == .auth)
     }
 }

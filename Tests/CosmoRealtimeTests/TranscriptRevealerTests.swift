@@ -20,7 +20,12 @@ struct TranscriptRevealerTests {
         await revealer.accelerate(to: .milliseconds(1))
 
         var last = ""
-        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        // Between one un-accelerated tick and the un-accelerated total: the
+        // ticker commits its first sleep at the old interval if it starts
+        // before `accelerate` lands, so a 10s wait is legitimate here — but
+        // crawling all six words (50s) still has to blow the budget, or this
+        // stops testing acceleration at all.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(30))
         for await prefix in revealer.revealed {
             last = prefix
             if prefix == full { break }
@@ -37,7 +42,7 @@ struct TranscriptRevealerTests {
         await revealer.accelerate(to: .seconds(5))
 
         var last = ""
-        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(30))
         for await prefix in revealer.revealed {
             last = prefix
             if prefix == "one two three" { break }

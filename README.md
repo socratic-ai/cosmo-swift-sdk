@@ -1,6 +1,10 @@
-# CosmoRealtime Swift SDK
+# CosmoAI Swift SDK
 
 Native async/await Swift client for the Cosmo Realtime API.
+
+> **Beta.** CosmoAI is pre-1.0: minor releases (`0.x` → `0.y`) may include
+> breaking API changes, so pin with `.upToNextMinor`. We will cut 1.0 once the
+> wire protocol and the public session API have stabilized.
 
 > New to the SDK? Start with the [Developer Guide](../docs/developer-guide.md)
 > — getting started, the credential model, and the expected session lifecycle.
@@ -14,26 +18,47 @@ Native async/await Swift client for the Cosmo Realtime API.
 
 ### Swift Package Manager
 
-The SDK is not published to a registry yet — depend on it by path:
-
 ```swift
 dependencies: [
-    // `name:` aliases the path-based package to `CosmoRealtime`. Without it
-    // SwiftPM derives the identity from the directory name (`swift`), and
-    // `package: "CosmoRealtime"` below fails to resolve.
-    .package(name: "CosmoRealtime", path: "../sdks/cosmo-realtime/swift"),
+    .package(
+        url: "https://github.com/socratic-ai/cosmo-swift-sdk",
+        .upToNextMinor(from: "0.1.0")
+    ),
 ],
 targets: [
     .target(
         name: "YourTarget",
         dependencies: [
-            .product(name: "CosmoRealtime", package: "CosmoRealtime"),
+            // The package resolves as `CosmoAI`; the module you import
+            // is `CosmoRealtime`.
+            .product(name: "CosmoRealtime", package: "cosmo-swift-sdk"),
         ]
     ),
 ]
 ```
 
-Or add via Xcode: **File → Add Package Dependencies → Add Local…** and select `sdks/cosmo-realtime/swift`.
+Or add via Xcode: **File → Add Package Dependencies…**, paste
+`https://github.com/socratic-ai/cosmo-swift-sdk`, and pick
+**Up to Next Minor Version** from `0.1.0`.
+
+### Local path (inside this repository)
+
+```swift
+dependencies: [
+    // `name:` aliases the path-based package to `CosmoAI`. Without it
+    // SwiftPM derives the identity from the directory name (`swift`), and
+    // `package: "CosmoAI"` below fails to resolve.
+    .package(name: "CosmoAI", path: "../sdks/cosmo-realtime/swift"),
+],
+targets: [
+    .target(
+        name: "YourTarget",
+        dependencies: [
+            .product(name: "CosmoRealtime", package: "CosmoAI"),
+        ]
+    ),
+]
+```
 
 ## Quickstart
 
@@ -111,10 +136,10 @@ the wire and the server applies neutral defaults.
 
 | Field | Meaning |
 |---|---|
-| `model` | Provider/model selection (discover via the models endpoint) |
+| `model` | Provider/model selection |
 | `voice` | Provider-specific prebuilt voice id |
 | `instructions` | System instructions |
-| `tools` | `.client(name:description:parameters:handler:)` specs this app fulfils, `.server(name:)` opt-ins, and typed inline server-tool definitions authored in code — one case per executor type, e.g. `.transferCall(name:description:queueId:)` (API-key sessions only; Cosmo runs them server-side) |
+| `tools` | `.client(name:description:parameters:handler:)` / `.backgroundClient(...)` specs this app fulfils, and typed zero-config server-tool opt-ins (`.webSearch`, `.examineImage`, `.detect`, `.point`) |
 | `interruptionSensitivity` | How readily the user's speech interrupts the agent (`.default` / `.low` / `.high`) |
 | `noiseCancellationEnabled` | Enable upstream input noise cancellation |
 | `resumeSessionId` | Resume a prior session (rides under the experimental knobs) |
@@ -251,8 +276,8 @@ RealtimeSession (actor)                  — public stream API
 ```
 
 Generated wire types live in the internal `CosmoRealtimeAPI` module
-(regenerated on every build from `../external-openapi.json`, which
-`backend/scripts/export_realtime_openapi.py` maintains) and are re-exposed
+(regenerated on every build from `../external-openapi.json`, which the
+monorepo backend's `scripts/export_realtime_openapi.py` maintains) and are re-exposed
 under clean names (`RealtimeSession.Ready`, `RealtimeSession.TranscriptDelta`,
 …) so consumers only ever `import CosmoRealtime`. The legacy
 `CosmoRealtimeClient` generates its types from the legacy spec
@@ -297,10 +322,10 @@ swift test                       # only the unit suite — fast, offline
 
 ### Run the full suite (E2E included)
 
-1. Start a local LiveKit server (re-uses the dev-mode compose file the backend already maintains):
+1. Start a local LiveKit server (re-uses the dev-mode compose file the
+   monorepo backend already maintains in its `scripts/` dir):
 
    ```bash
-   cd backend/scripts
    docker compose -f docker-compose.livekit.yml up -d
    ```
 
@@ -314,10 +339,10 @@ swift test                       # only the unit suite — fast, offline
      swift test
    ```
 
-3. Stop the server when done:
+3. Stop the server when done (same dir):
 
    ```bash
-   cd backend/scripts && docker compose -f docker-compose.livekit.yml down
+   docker compose -f docker-compose.livekit.yml down
    ```
 
 CI runs the E2E suite automatically — see `.github/workflows/realtime-swift-ci.yml`. It downloads the `livekit-server` binary (pinned to the same version as the docker-compose) instead of using docker, because GitHub macOS runners don't pre-install Docker Desktop.

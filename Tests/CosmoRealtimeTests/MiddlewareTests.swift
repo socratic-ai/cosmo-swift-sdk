@@ -126,7 +126,7 @@ struct MiddlewareTests {
         "BearerAuthMiddleware emits 'Bearer <token>' for both an api key and a minted JWT",
         arguments: [
             "wsk_live_abcdef0123456789",
-            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyLTQyIn0.s3cr3t-sig",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyLTQyIn0.s3cr3t-sig", // gitleaks:allow — fake JWT fixture, unsigned dummy
         ]
     )
     func bearerEmitsValueForBothCredentialForms(token: String) async throws {

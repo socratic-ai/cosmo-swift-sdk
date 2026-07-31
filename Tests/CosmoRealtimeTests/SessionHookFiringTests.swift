@@ -220,21 +220,25 @@ struct SessionHookFiringTests {
 
     @Test("session-ended with no transport close finishes after the grace timer")
     func serverEndGraceForcesTeardown() async throws {
-        let previous = RealtimeSession.serverEndGraceNanos
-        RealtimeSession.serverEndGraceNanos = 20_000_000  // 20ms
-        defer { RealtimeSession.serverEndGraceNanos = previous }
-
         let ctxBox = CaptureBox<SessionEndContext>()
         var hooks: [Hook] = []
         hooks.append(sessionEnd { ctx in await ctxBox.set(ctx) })
 
         let transport = FakeSessionTransport()
-        let session = RealtimeSession(transport: transport)
+        let session = RealtimeSession(transport: transport, serverEndGraceNanos: 20_000_000)
         try await session._start(config: SessionConfig(hooks: hooks))
         let frame = Data(#"{"type":"session-ended","reason":"worker done"}"#.utf8)
         await session._receiveFrame(frame)
         // No close follows — the grace timer must force the clean teardown.
-        try await Task.sleep(nanoseconds: 200_000_000)
+        // Polled rather than slept: co-scheduled with the rest of the suite the
+        // 20ms timer, the teardown and the hook can take orders of magnitude
+        // longer than the timer to drain, so any fixed budget is a race. The
+        // ceiling is never reached when the teardown works — the loop exits on
+        // the hook — so it costs nothing except when this is actually broken.
+        let deadline = ContinuousClock().now + .seconds(30)
+        while await ctxBox.value == nil, ContinuousClock().now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
 
         let ctx = await ctxBox.value
         #expect(ctx?.reason == .serverEnded)

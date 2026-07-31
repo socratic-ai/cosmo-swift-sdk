@@ -382,15 +382,6 @@ private func traceTool(from value: JSONValue) throws -> SessionConfig.Tool {
             throw TraceDriverError.unsupported("client tool spec \(value)")
         }
         return .client(name: name, description: description, parameters: parameters)
-    case "transfer_call":
-        guard
-            case .string(let name)? = spec["name"],
-            case .string(let description)? = spec["description"],
-            case .string(let queueId)? = spec["queue_id"]
-        else {
-            throw TraceDriverError.unsupported("transfer_call tool spec \(value)")
-        }
-        return .transferCall(name: name, description: description, queueId: queueId)
     default:
         throw TraceDriverError.unsupported("tool kind \(kind)")
     }

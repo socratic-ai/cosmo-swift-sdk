@@ -17,7 +17,7 @@ public struct ToolSchemaError: Error, Sendable, Equatable, LocalizedError {
 }
 
 /// Mirrors the backend's restricted JSON-schema dialect for client-declared tools
-/// (`backend/app/realtime/tools/client_declared.py`: `_SCHEMA_ALLOWED_KEYS` /
+/// (the monorepo backend's `app/realtime/tools/client_declared.py`: `_SCHEMA_ALLOWED_KEYS` /
 /// `_schema_violation`). A declaration whose `parametersJSON` carries a key
 /// outside this set is rejected at the backend and **dropped** — the model never
 /// sees the tool. The interpretation (depth counted from 1 at the top-level

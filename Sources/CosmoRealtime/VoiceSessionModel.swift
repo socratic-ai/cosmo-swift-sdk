@@ -223,6 +223,11 @@ public final class VoiceSessionModel {
     /// tests can pace the reveal fast enough to assert on. Nil in production.
     internal var assistantRevealIntervalOverride: Duration?
 
+    /// Test seam: the in-flight reveal, so a test can await the paced line
+    /// settling instead of polling a wall clock it cannot bound on a loaded
+    /// machine. Completes once the reveal has caught the final text.
+    internal var assistantRevealTask: Task<Void, Never>? { asstRevealTask }
+
     /// User text turns submitted before the session is live, echoed into the
     /// transcript immediately and flushed to the wire on ``.ready``. Each keeps
     /// the echoed line's id so a failed flush can flag that bubble.
@@ -329,12 +334,14 @@ public final class VoiceSessionModel {
             return
         }
 
-        // Kick the VPIO spin-up at the press so it overlaps the REST +
-        // signaling legs instead of landing in the join's pc_created phase.
-        // Hosts may warm earlier (e.g. while the Mac dock is expanded); this
-        // press-time touch is the guarantee and a no-op when already warm.
-        // VPIO is never held while idle, where it would degrade the speaker —
-        // released back on the return to idle/error.
+        // Kick the capture engine's spin-up at the press so it overlaps the
+        // REST + signaling legs instead of landing in the join's pc_created
+        // phase. Not VPIO's cold-build specifically anymore — capture now
+        // runs software processing (see ``RealtimeSession/audioCaptureOptions``)
+        // — but removing this and letting the real publish be the sole
+        // capture-open point (tested directly) made no difference to the
+        // residual connecting-time transient, so it stayed disabled for no
+        // benefit. Restored: it's still a legitimate latency overlap.
         touchMicWarmWindow()
 
         let voiceName = self.geminiVoice.rawValue
@@ -1136,9 +1143,19 @@ public final class VoiceSessionModel {
         // prefix actually reaches ``asstFinalText``. Chained after the prior
         // setTarget so deltas apply in order (see ``asstSetTargetChain``).
         let prior = asstSetTargetChain
-        asstSetTargetChain = Task { @MainActor in
+        asstSetTargetChain = Task { @MainActor [weak self] in
             await prior?.value
             await revealer?.setTarget(cumulative, isFinal: false)
+            // The paced prefix can already have caught this target — the reveal
+            // outran a slow final. Then the revealer has no further word to
+            // yield, so the consumer never sees a prefix to compare against
+            // ``asstFinalText`` and the line would stay bound to a reveal that
+            // is already done. Close it here; the consumer covers the opposite
+            // order, where the prefix arrives after the final is known.
+            guard let self, self.asstRevealLineId == lineId,
+                  let final = self.asstFinalText, self.asstRevealedPrefix == final
+            else { return }
+            await revealer?.finish()
         }
         publishTranscript()
     }

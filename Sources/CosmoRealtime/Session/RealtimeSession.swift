@@ -215,8 +215,10 @@ public actor RealtimeSession {
     private var serverEndReason: String?
     private var serverEndGraceTask: Task<Void, Never>?
     /// Grace between a ``session-ended`` frame and a forced teardown when the
-    /// expected transport close never follows. Internal for tests.
-    static var serverEndGraceNanos: UInt64 = 5_000_000_000
+    /// expected transport close never follows. Per-session so a test can shorten
+    /// its own without reaching into every other session in the process.
+    let serverEndGraceNanos: UInt64
+    static let defaultServerEndGraceNanos: UInt64 = 5_000_000_000
     /// Last mute state this client asserted; re-asserted on reconnect the same
     /// way the input binding is.
     private var lastSetMuted: Bool?
@@ -298,9 +300,14 @@ public actor RealtimeSession {
 
     // MARK: Init + start
 
-    init(transport: any SessionTransport, options: Options? = nil) {
+    init(
+        transport: any SessionTransport,
+        options: Options? = nil,
+        serverEndGraceNanos: UInt64 = defaultServerEndGraceNanos
+    ) {
         self.transport = transport
         self.options = options
+        self.serverEndGraceNanos = serverEndGraceNanos
         let eventStream = AsyncThrowingStream<Event, Error>.makeStream(bufferingPolicy: .unbounded)
         self.events = eventStream.stream
         self.eventsContinuation = eventStream.continuation
@@ -415,7 +422,7 @@ public actor RealtimeSession {
         do {
             let sink = ClientToolJobSink(
                 deliver: { [weak self] result in
-                    try await self?._sendCosmoToolJobResult(result)
+                    try await self?._sendToolJobResult(result)
                 },
                 isOpen: { [weak self] in await self?._isSendable() ?? false }
             )
@@ -707,8 +714,9 @@ public actor RealtimeSession {
     /// hang forever.
     private func _armServerEndGrace() {
         guard serverEndGraceTask == nil else { return }
+        let grace = serverEndGraceNanos
         serverEndGraceTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: Self.serverEndGraceNanos)
+            try? await Task.sleep(nanoseconds: grace)
             await self?._serverEndGraceFired()
         }
     }

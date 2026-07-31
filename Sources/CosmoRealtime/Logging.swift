@@ -11,8 +11,8 @@ import Foundation
 /// `client` / `dispatch` / `sends` / `screenshare` / `session-ws`;
 /// the app uses `session-model` / `voice-session` / `audio` / …).
 ///
-/// See this package's `CLAUDE.md` ("Querying logs") for the canonical
-/// query and the connect-latency phase breakdown.
+/// See this package's internal contributor notes ("Querying logs") for
+/// the canonical query and the connect-latency phase breakdown.
 public enum CosmoRealtimeLog {
     public static let subsystem = "socratic.cosmo-realtime"
 }

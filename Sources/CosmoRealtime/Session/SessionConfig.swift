@@ -33,7 +33,7 @@ public struct SessionConfig: Sendable, Equatable {
     public var agentInputs: [String: String]?
     /// Provider/model selection. ``nil`` lets the server choose its
     /// default; unavailable values are rejected explicitly at session
-    /// start. Discover valid ones via the models capability endpoint.
+    /// start.
     public var model: String?
     /// Provider-scoped model knobs (sampling, reasoning depth, turn-taking),
     /// discriminated on provider. Each knob is honored only by its provider,
@@ -246,20 +246,6 @@ public struct SessionConfig: Sendable, Equatable {
             parameters: [String: JSONValue],
             handler: BackgroundClientToolHandler
         )
-        /// Define a transfer-call tool inline: the model-facing ``name`` /
-        /// ``description`` plus the workspace transfer queue to hand the call
-        /// to. Cosmo runs it server-side; the definition is session-scoped
-        /// (nothing is registered or persisted) and it takes no authored
-        /// parameters — the arguments it accepts are server-defined.
-        /// ``queueId`` is never shown to the model; find it in the Cosmo
-        /// dashboard under Realtime agents → Manage queues. Each executor
-        /// type is its own typed tool case. Semantic checks (name rules,
-        /// queue-in-workspace) run server-side at session start.
-        case transferCall(
-            name: String,
-            description: String,
-            queueId: String
-        )
         /// Opt-in to the server-executed web-search tool. Zero-config —
         /// the server owns the model-facing declaration. Resolved-flow
         /// vocabulary; the legacy endpoint ignores it.
@@ -281,7 +267,6 @@ public struct SessionConfig: Sendable, Equatable {
             switch self {
             case let .client(name, _, _, _): return name
             case let .backgroundClient(name, _, _, _): return name
-            case let .transferCall(name, _, _): return name
             case .webSearch: return "web_search"
             case .examineImage: return "examine_image"
             case .detect: return "cosmo_detect"
@@ -297,10 +282,6 @@ public struct SessionConfig: Sendable, Equatable {
                 return ln == rn && ld == rd && lp == rp
             case let (.backgroundClient(ln, ld, lp, _), .backgroundClient(rn, rd, rp, _)):
                 return ln == rn && ld == rd && lp == rp
-            case let (
-                .transferCall(ln, ld, lq), .transferCall(rn, rd, rq)
-            ):
-                return ln == rn && ld == rd && lq == rq
             case (.webSearch, .webSearch), (.examineImage, .examineImage),
                 (.detect, .detect), (.point, .point):
                 return true
@@ -463,15 +444,6 @@ extension SessionConfig.Tool {
                     parameters: .init(additionalProperties: try objectContainer(from: parameters))
                 )
             )
-        case .transferCall(let name, let description, let queueId):
-            return .transferCall(
-                .init(
-                    description: description,
-                    kind: .transferCall,
-                    name: name,
-                    queueId: queueId
-                )
-            )
         case .webSearch:
             return .webSearch(.init(kind: .webSearch))
         case .examineImage:
@@ -495,15 +467,6 @@ extension SessionConfig.Tool {
                     kind: .client,
                     name: name,
                     parameters: .init(additionalProperties: try objectContainer(from: parameters))
-                )
-            )
-        case .transferCall(let name, let description, let queueId):
-            return .transferCall(
-                .init(
-                    description: description,
-                    kind: .transferCall,
-                    name: name,
-                    queueId: queueId
                 )
             )
         case .webSearch:

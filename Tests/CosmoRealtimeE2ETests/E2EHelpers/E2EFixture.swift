@@ -4,8 +4,8 @@ import Testing
 /// Configuration for an E2E test run against a local
 /// ``livekit-server --dev``. Reads ``LIVEKIT_TESTING_*`` env vars
 /// (matching LiveKit's own ``TestEnvironment`` convention) and
-/// falls back to the dev defaults from
-/// ``backend/scripts/docker-compose.livekit.yml``.
+/// falls back to the dev defaults from the monorepo backend's
+/// ``scripts/docker-compose.livekit.yml``.
 struct E2EFixture {
     let serverURL: String
     let apiKey: String
@@ -59,7 +59,7 @@ enum SkipE2E: Error, CustomStringConvertible {
     var description: String {
         switch self {
         case .notConfigured:
-            return "LIVEKIT_TESTING_URL not set — skipping E2E test. Run `cd backend/scripts && docker compose -f docker-compose.livekit.yml up -d` to enable."
+            return "LIVEKIT_TESTING_URL not set — skipping E2E test. Run `docker compose -f docker-compose.livekit.yml up -d` (monorepo backend, scripts/ dir) to enable."
         }
     }
 }

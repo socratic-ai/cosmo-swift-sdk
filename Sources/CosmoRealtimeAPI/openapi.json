@@ -91,39 +91,6 @@
         "title": "MintTokenResponse",
         "type": "object"
       },
-      "RealtimeAgentSummary": {
-        "properties": {
-          "display_name": {
-            "title": "Display Name",
-            "type": "string"
-          },
-          "id": {
-            "format": "uuid",
-            "title": "Id",
-            "type": "string"
-          },
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "updated_at": {
-            "title": "Updated At",
-            "type": "number"
-          },
-          "voice": {
-            "title": "Voice",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "display_name",
-          "updated_at"
-        ],
-        "title": "RealtimeAgentSummary",
-        "type": "object"
-      },
       "RealtimeBotLlmStarted": {
         "description": "Model began generating its turn (first text or audio event arrived).\n\nDistinct from ``bot-started-speaking`` so UI can show \"thinking\u2026\" before\naudio is on the wire \u2014 useful when the model takes a moment to start\ngenerating, or when tool calls precede speech.",
         "properties": {
@@ -250,7 +217,6 @@
                   "point": "#/components/schemas/RealtimePointToolSpec",
                   "screen_interaction": "#/components/schemas/RealtimeScreenInteractionSpec",
                   "server": "#/components/schemas/RealtimeServerToolSpec",
-                  "transfer_call": "#/components/schemas/RealtimeTransferCallToolSpec",
                   "web_search": "#/components/schemas/RealtimeWebSearchToolSpec"
                 },
                 "propertyName": "kind"
@@ -264,9 +230,6 @@
                 },
                 {
                   "$ref": "#/components/schemas/RealtimeCatalogToolSpec"
-                },
-                {
-                  "$ref": "#/components/schemas/RealtimeTransferCallToolSpec"
                 },
                 {
                   "$ref": "#/components/schemas/RealtimeWebSearchToolSpec"
@@ -609,54 +572,6 @@
           "type"
         ],
         "title": "RealtimeCosmoSessionState",
-        "type": "object"
-      },
-      "RealtimeCosmoToolJobResult": {
-        "description": "First-party cosmo client message: a long-running client tool finished\noff-band and is delivering its terminal result. Wire-compatible with the\ninternal ``tool_job_result`` \u2014 the server resolves the original tool call\nfrom ``job_id`` and injects the outcome. ``summary`` / ``error`` are the\nmodel-facing text; ``result`` is structured data for logging.",
-        "properties": {
-          "error": {
-            "title": "Error",
-            "type": "string"
-          },
-          "job_id": {
-            "title": "Job Id",
-            "type": "string"
-          },
-          "result": {
-            "additionalProperties": true,
-            "title": "Result",
-            "type": "object"
-          },
-          "status": {
-            "enum": [
-              "completed",
-              "failed"
-            ],
-            "title": "Status",
-            "type": "string"
-          },
-          "summary": {
-            "title": "Summary",
-            "type": "string"
-          },
-          "tool_name": {
-            "title": "Tool Name",
-            "type": "string"
-          },
-          "type": {
-            "const": "tool_job_result",
-            "default": "tool_job_result",
-            "title": "Type",
-            "type": "string"
-          }
-        },
-        "required": [
-          "job_id",
-          "tool_name",
-          "status",
-          "type"
-        ],
-        "title": "RealtimeCosmoToolJobResult",
         "type": "object"
       },
       "RealtimeCosmoTurnContext": {
@@ -1065,7 +980,6 @@
                   "point": "#/components/schemas/RealtimePointToolSpec",
                   "screen_interaction": "#/components/schemas/RealtimeScreenInteractionSpec",
                   "server": "#/components/schemas/RealtimeServerToolSpec",
-                  "transfer_call": "#/components/schemas/RealtimeTransferCallToolSpec",
                   "web_search": "#/components/schemas/RealtimeWebSearchToolSpec"
                 },
                 "propertyName": "kind"
@@ -1079,9 +993,6 @@
                 },
                 {
                   "$ref": "#/components/schemas/RealtimeCatalogToolSpec"
-                },
-                {
-                  "$ref": "#/components/schemas/RealtimeTransferCallToolSpec"
                 },
                 {
                   "$ref": "#/components/schemas/RealtimeWebSearchToolSpec"
@@ -1145,23 +1056,6 @@
           "type"
         ],
         "title": "RealtimeModelText",
-        "type": "object"
-      },
-      "RealtimeModelsResponse": {
-        "description": "Provider/model/voice capabilities for the caller's workspace.",
-        "properties": {
-          "providers": {
-            "items": {
-              "$ref": "#/components/schemas/RealtimeProviderModelsInfo"
-            },
-            "title": "Providers",
-            "type": "array"
-          }
-        },
-        "required": [
-          "providers"
-        ],
-        "title": "RealtimeModelsResponse",
         "type": "object"
       },
       "RealtimeOpenAIModelOptions": {
@@ -1237,56 +1131,6 @@
           "openai_provider_available"
         ],
         "title": "RealtimeProviderCapabilities",
-        "type": "object"
-      },
-      "RealtimeProviderModelsInfo": {
-        "description": "Session-start capabilities of one realtime model provider.",
-        "properties": {
-          "available": {
-            "description": "Whether a session may select this provider \u2014 requires both workspace eligibility and server-side provider configuration.",
-            "title": "Available",
-            "type": "boolean"
-          },
-          "default": {
-            "description": "Whether a session that states no preference uses this provider.",
-            "title": "Default",
-            "type": "boolean"
-          },
-          "models": {
-            "description": "Model ids sessions on this provider run on.",
-            "items": {
-              "type": "string"
-            },
-            "title": "Models",
-            "type": "array"
-          },
-          "provider": {
-            "enum": [
-              "gemini",
-              "openai",
-              "cosmo_voice_personaplex",
-              "cosmo_voice_ultravox"
-            ],
-            "title": "Provider",
-            "type": "string"
-          },
-          "voices": {
-            "description": "Voice ids accepted at session start for this provider.",
-            "items": {
-              "type": "string"
-            },
-            "title": "Voices",
-            "type": "array"
-          }
-        },
-        "required": [
-          "provider",
-          "available",
-          "default",
-          "models",
-          "voices"
-        ],
-        "title": "RealtimeProviderModelsInfo",
         "type": "object"
       },
       "RealtimeReady": {
@@ -1865,6 +1709,54 @@
         "title": "RealtimeToolInvocation",
         "type": "object"
       },
+      "RealtimeToolJobResult": {
+        "description": "A long-running client tool finished off-band and is delivering its\nterminal result. The server resolves the original tool call from\n``job_id`` and injects the outcome; ``summary`` / ``error`` are the\nmodel-facing text and ``result`` is structured data for logging.\n\nHalf of the background client-tool primitive \u2014 a tool whose work outlives\nthe RPC reply budget acks first and lands its outcome here. Every SDK\nimplements it, so it is protocol vocabulary rather than a first-party\nextension.",
+        "properties": {
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "result": {
+            "additionalProperties": true,
+            "title": "Result",
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "tool_name": {
+            "title": "Tool Name",
+            "type": "string"
+          },
+          "type": {
+            "const": "tool_job_result",
+            "default": "tool_job_result",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "tool_name",
+          "status",
+          "type"
+        ],
+        "title": "RealtimeToolJobResult",
+        "type": "object"
+      },
       "RealtimeToolResult": {
         "description": "Server-side tool finished. ``summary`` is a short human-readable line.",
         "properties": {
@@ -1933,41 +1825,6 @@
         ],
         "title": "RealtimeTranscriptRole",
         "type": "string"
-      },
-      "RealtimeTransferCallToolSpec": {
-        "additionalProperties": false,
-        "description": "One transfer-call tool defined inline at session start: the\nmodel-facing name/description plus the workspace transfer queue to hand\nthe call to. Session-scoped \u2014 nothing is registered or persisted. Takes\nno authored parameters; the arguments it accepts are server-defined.\n\nUnknown fields are a schema error, not silently dropped. Semantic checks\n(name grammar/conflicts, description sanitization, queue-in-workspace,\ncredential gating) run server-side at session start and reject the whole\nstart with a typed 422 \u2014 misconfiguration fails at connect, not mid-call.",
-        "properties": {
-          "description": {
-            "maxLength": 2048,
-            "title": "Description",
-            "type": "string"
-          },
-          "kind": {
-            "const": "transfer_call",
-            "default": "transfer_call",
-            "title": "Kind",
-            "type": "string"
-          },
-          "name": {
-            "maxLength": 64,
-            "title": "Name",
-            "type": "string"
-          },
-          "queue_id": {
-            "format": "uuid",
-            "title": "Queue Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "description",
-          "queue_id",
-          "kind"
-        ],
-        "title": "RealtimeTransferCallToolSpec",
-        "type": "object"
       },
       "RealtimeTtsProvider": {
         "description": "External TTS providers Ultravox can render via ``externalVoice``.",
@@ -2402,73 +2259,6 @@
         "x-auth-type": "external_api",
         "x-required-scopes": [
           "user_tokens:mint"
-        ],
-        "x-workspace-exempt": true
-      }
-    },
-    "/api/v1/external/realtime/agents": {
-      "get": {
-        "description": "List the workspace's playground agents for the in-app picker.",
-        "operationId": "list_realtime_agents",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/RealtimeAgentSummary"
-                  },
-                  "title": "Response List Realtime Agents",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "security": [
-          {
-            "ApiKeyAuth": []
-          }
-        ],
-        "summary": "List Realtime Agents",
-        "tags": [
-          "external-realtime"
-        ],
-        "x-auth-type": "external_api",
-        "x-required-scopes": [
-          "realtime:use"
-        ],
-        "x-workspace-exempt": true
-      }
-    },
-    "/api/v1/external/realtime/models": {
-      "get": {
-        "operationId": "list_realtime_models",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RealtimeModelsResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "security": [
-          {
-            "ApiKeyAuth": []
-          }
-        ],
-        "summary": "External Realtime Models Endpoint",
-        "tags": [
-          "external-realtime"
-        ],
-        "x-auth-type": "external_api",
-        "x-required-scopes": [
-          "realtime:use"
         ],
         "x-workspace-exempt": true
       }

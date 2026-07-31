@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "CosmoRealtime",
+    name: "CosmoAI",
     platforms: [
         .macOS(.v13),
         .iOS(.v16),
@@ -112,7 +112,7 @@ let package = Package(
         // mode. Skipped unless ``LIVEKIT_TESTING_URL`` is set in the
         // environment. To run locally:
         //
-        //   cd backend/scripts && docker compose -f docker-compose.livekit.yml up -d
+        //   docker compose -f docker-compose.livekit.yml up -d   (monorepo backend, scripts/ dir)
         //   cd sdks/cosmo-realtime/swift
         //   LIVEKIT_TESTING_URL=ws://localhost:7880 \
         //     LIVEKIT_TESTING_API_KEY=devkey \

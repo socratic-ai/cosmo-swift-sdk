@@ -137,36 +137,6 @@ struct SessionConfigTests {
         #expect(serverSpec.count == 1)
     }
 
-    @Test("transfer-call tools serialize as their own typed wire kind")
-    func transferCallToolSerializes() throws {
-        let fields = try encodedFields(
-            SessionConfig(
-                tools: [
-                    .transferCall(
-                        name: "escalate_to_support",
-                        description: "Transfer the caller to a human agent.",
-                        queueId: "0b3f8c1a-2d4e-4f6a-8b0c-1d2e3f4a5b6c"
-                    )
-                ]
-            )
-        )
-        guard let agent = object(fields, "agent"),
-            case .array(let tools)? = agent["tools"], tools.count == 1,
-            case .object(let spec) = tools[0]
-        else {
-            Issue.record("expected one transfer-call tool spec, got \(String(describing: fields["agent"]))")
-            return
-        }
-        #expect(spec["kind"] == .string("transfer_call"))
-        #expect(spec["name"] == .string("escalate_to_support"))
-        #expect(spec["description"] == .string("Transfer the caller to a human agent."))
-        #expect(spec["queue_id"] == .string("0b3f8c1a-2d4e-4f6a-8b0c-1d2e3f4a5b6c"))
-        // The retired generic-envelope fields never appear on the wire.
-        #expect(spec["type"] == nil)
-        #expect(spec["config"] == nil)
-        #expect(spec["parameters"] == nil)
-    }
-
     @Test("client-tool handlers are local-only and never reach the wire")
     func handlersStayLocal() throws {
         let handler: ClientToolHandler = { _ in ["ok": .bool(true)] }

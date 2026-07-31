@@ -2,9 +2,9 @@ import CosmoRealtimeAPI
 import Foundation
 
 /// First-party Cosmo sends, namespaced behind ``RealtimeSession/cosmo``. They
-/// ride the published external transport but carry Cosmo product payloads
-/// (per-turn desktop context, background-agent updates) wire-compatible with the
-/// internal protocol; external integrations never use them.
+/// ride the published external transport but carry desktop-shaped Cosmo
+/// payloads (cursor and frontmost app, display topology) wire-compatible with
+/// the internal protocol; external integrations never use them.
 extension RealtimeSession {
 
     /// Namespace for the first-party cosmo client messages.
@@ -62,30 +62,6 @@ extension RealtimeSession {
                 frontmostApp: frontmostApp,
                 openApps: openApps,
                 _type: .turnContext
-            )
-        )
-    }
-
-    /// Deliver a background client tool's terminal result to the agent. The
-    /// worker resolves the original tool call from ``jobId`` and injects the
-    /// outcome. Called by ``ClientToolJobSink`` when a job completes/fails.
-    func _sendCosmoToolJobResult(_ result: BackgroundToolResult) async throws {
-        try _assertSendable()
-        let resultPayload: CosmoRealtimeAPI.Components.Schemas.RealtimeCosmoToolJobResult.ResultPayload?
-        if let object = result.result {
-            resultPayload = .init(additionalProperties: try objectContainer(from: object))
-        } else {
-            resultPayload = nil
-        }
-        try await _publish(
-            CosmoRealtimeAPI.Components.Schemas.RealtimeCosmoToolJobResult(
-                error: result.error,
-                jobId: result.jobId,
-                result: resultPayload,
-                status: result.status == .completed ? .completed : .failed,
-                summary: result.summary,
-                toolName: result.toolName,
-                _type: .toolJobResult
             )
         )
     }

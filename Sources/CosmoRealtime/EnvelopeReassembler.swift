@@ -95,6 +95,15 @@ struct EnvelopeBuffer {
 actor EnvelopeReassembler {
     private var buffers: [String: EnvelopeBuffer] = [:]
 
+    /// How long a partially-filled envelope survives before the sweep drops it.
+    /// Injectable so tests can pin both sides of the boundary against elapsed
+    /// wall time they do not control.
+    private let ttl: TimeInterval
+
+    init(ttl: TimeInterval = envelopeTTL) {
+        self.ttl = ttl
+    }
+
     enum Result {
         case pending
         case complete(Data)
@@ -163,6 +172,6 @@ actor EnvelopeReassembler {
 
     private func sweepStale() {
         let now = Date()
-        buffers = buffers.filter { now.timeIntervalSince($0.value.createdAt) < envelopeTTL }
+        buffers = buffers.filter { now.timeIntervalSince($0.value.createdAt) < ttl }
     }
 }

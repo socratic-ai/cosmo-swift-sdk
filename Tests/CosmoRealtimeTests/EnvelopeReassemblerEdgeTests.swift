@@ -239,18 +239,37 @@ struct EnvelopeReassemblerEdgeTests {
 
     @Test("Stale-sweep is non-destructive within the TTL")
     func freshEnvelopeSurvivesShortDelay() async throws {
-        // We can't inject a clock here; the reassembler reads `Date()`
-        // directly. Cover the negative case only: a freshly-opened
-        // envelope is still in-flight a fraction of a second later
-        // (well under the 30s TTL).
-        let r = EnvelopeReassembler()
+        // The TTL is injected rather than slept against: the reassembler ages
+        // buffers off `Date()`, so a test that leans on "50ms is well under 30s"
+        // is really asserting that it gets rescheduled promptly, which is not
+        // true beside the rest of the suite. An hour of headroom makes the
+        // delay irrelevant.
+        let r = EnvelopeReassembler(ttl: 3600)
         _ = await r.consume(envelopeId: "env-fresh", seq: 0, total: 2, data: b64(Data("aa".utf8)))
-        try await Task.sleep(nanoseconds: 50_000_000)  // 50 ms — << envelopeTTL
+        try await Task.sleep(for: .milliseconds(50))
         let r1 = await r.consume(envelopeId: "env-fresh", seq: 1, total: 2, data: b64(Data("bb".utf8)))
         guard case .complete(let out) = r1 else {
-            Issue.record("expected envelope to still be alive after 50ms, got \(r1)")
+            Issue.record("expected envelope to still be alive within the TTL, got \(r1)")
             return
         }
         #expect(out == Data("aabb".utf8))
+    }
+
+    @Test("Stale-sweep drops a half-filled envelope past the TTL")
+    func stalePartialEnvelopeIsSwept() async throws {
+        // The positive half, which a wall-clock test could only reach by
+        // sleeping out the real 30s TTL. Starvation only ages the buffer
+        // further past an already-elapsed TTL, so this cannot flake the way
+        // the negative case did.
+        let r = EnvelopeReassembler(ttl: 0.01)
+        _ = await r.consume(envelopeId: "env-stale", seq: 0, total: 2, data: b64(Data("aa".utf8)))
+        try await Task.sleep(for: .milliseconds(50))
+        // The first part is gone, so the envelope reopens holding only this
+        // chunk and never completes — a dropped part must not be joinable.
+        let r1 = await r.consume(envelopeId: "env-stale", seq: 1, total: 2, data: b64(Data("bb".utf8)))
+        guard case .pending = r1 else {
+            Issue.record("expected the swept envelope to reopen as pending, got \(r1)")
+            return
+        }
     }
 }

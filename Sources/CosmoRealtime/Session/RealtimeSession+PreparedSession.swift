@@ -8,7 +8,11 @@ import os
 /// ``LiveKitSessionTransport``'s join — prepared signaling state lives on the
 /// ``Room``, so both must build identical instances.
 func makeSessionRoom() -> Room {
-    Room(roomOptions: RoomOptions(adaptiveStream: true, dynacast: true))
+    Room(roomOptions: RoomOptions(
+        defaultAudioCaptureOptions: RealtimeSession.audioCaptureOptions,
+        adaptiveStream: true,
+        dynacast: true
+    ))
 }
 
 extension RealtimeSession {
