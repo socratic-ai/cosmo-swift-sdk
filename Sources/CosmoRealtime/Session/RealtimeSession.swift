@@ -247,14 +247,24 @@ public actor RealtimeSession {
     private nonisolated let statesContinuation: AsyncStream<State>.Continuation
 
     /// Fires once when the agent participant publishes a track — LiveKit's
-    /// race-free readiness signal, distinct from the ``ready`` data frame.
-    /// Internal: the app wrapper (``VoiceSession``) drains it to latch
-    /// readiness when the broadcast ``ready`` frame is lost to the
-    /// pre-data-channel race. The wire-facing ``events`` stream is unchanged —
-    /// this never fabricates a ``ready`` event on it.
-    nonisolated let agentLive: AsyncStream<Void>
+    /// race-free liveness signal, distinct from the wire ``Event/ready(_:)``
+    /// frame and deliberately not a substitute for it: only ``ready`` carries
+    /// the session id, the rejected-tool list, and the effective duration cap.
+    ///
+    /// Use it to drive a "connecting…" spinner without gating that spinner on
+    /// a data frame. Prefer ``waitUntilAgentLive()`` unless you need the
+    /// stream. The wire-facing ``events`` stream is unchanged — this never
+    /// fabricates a ``ready`` event on it.
+    public nonisolated let agentLive: AsyncStream<Void>
     private nonisolated let agentLiveContinuation: AsyncStream<Void>.Continuation
     private var didSignalAgentLive = false
+
+    /// Tasks parked in ``waitUntilEnded()``, all resumed once by ``_close``.
+    private var endWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Tasks parked in ``waitUntilAgentLive()``. Resumed by the agent-track
+    /// signal, or by ``_close`` so a session that dies first never hangs them.
+    private var agentLiveWaiters: [CheckedContinuation<Void, Never>] = []
 
     // MARK: Audio levels
 
@@ -329,6 +339,9 @@ public actor RealtimeSession {
         didSignalAgentLive = true
         Self.log.info("realtime.agent_track_observed — readiness signalled from track (ready frame independent)")
         agentLiveContinuation.yield(())
+        let waiters = agentLiveWaiters
+        agentLiveWaiters = []
+        for waiter in waiters { waiter.resume() }
     }
 
     /// Start a session: one REST session-start + media-transport join.
@@ -481,15 +494,30 @@ public actor RealtimeSession {
 
     // MARK: Sends
 
-    /// Send a text turn to the agent. ``audioResponse: false``
-    /// suppresses TTS for this turn (text in, text out).
-    public func send(text: String, audioResponse: Bool = true) async throws {
+    /// Send a text turn to the agent. The agent replies in whatever modality
+    /// the session runs in.
+    public func send(text: String) async throws {
         try _assertSendable()
         try await _publish(
             CosmoRealtimeAPI.Components.Schemas.RealtimeClientText(
                 content: text,
-                options: .init(audioResponse: audioResponse),
                 _type: .sendText
+            )
+        )
+    }
+
+    /// Give the agent context without asking it anything.
+    ///
+    /// The note lands in the model's context for its next reply and never
+    /// becomes a turn of its own: no spoken response, no assistant message,
+    /// no interruption of what the agent is saying. For live application
+    /// state; ``send(text:)`` is the opposite, it asks.
+    public func send(context: String) async throws {
+        try _assertSendable()
+        try await _publish(
+            CosmoRealtimeAPI.Components.Schemas.RealtimeClientContext(
+                content: context,
+                _type: .sendContext
             )
         )
     }
@@ -556,6 +584,35 @@ public actor RealtimeSession {
         try await _publish(
             CosmoRealtimeAPI.Components.Schemas.RealtimeClientActivityEnd(_type: .activityEnd)
         )
+    }
+
+    /// Suspend until the agent participant has published a track, or the
+    /// session ends first. Returns immediately if it already has.
+    ///
+    /// This is liveness, not readiness: it proves an agent is on the other
+    /// end, and carries no session metadata. Keep awaiting
+    /// ``Event/ready(_:)`` on ``events`` for the session id, rejected tools,
+    /// and the effective duration cap.
+    public func waitUntilAgentLive() async {
+        if didSignalAgentLive { return }
+        if case .closed = lifecycle { return }
+        await withCheckedContinuation { continuation in
+            agentLiveWaiters.append(continuation)
+        }
+    }
+
+    /// Suspend until the session has ended, for any reason — ``end()``, a
+    /// server-side stop, or a transport drop. Returns immediately if it
+    /// already has. Any number of tasks may wait.
+    ///
+    /// This is the supported way to hold a process open for the length of a
+    /// call. It does not consume ``events``, so a separate task can drain the
+    /// stream while the main path awaits this.
+    public func waitUntilEnded() async {
+        if case .closed = lifecycle { return }
+        await withCheckedContinuation { continuation in
+            endWaiters.append(continuation)
+        }
     }
 
     /// Gracefully end the session: best-effort wire ``end`` frame, then
@@ -767,6 +824,15 @@ public actor RealtimeSession {
         eventsContinuation.finish()
         agentLiveContinuation.finish()
         await transport.close()
+        // Last: a waiter that wakes up sees a fully torn-down session. The
+        // agent-live waiters are released too — the agent never showed, and
+        // leaving them parked would hang the caller past the session.
+        let live = agentLiveWaiters
+        agentLiveWaiters = []
+        for waiter in live { waiter.resume() }
+        let waiters = endWaiters
+        endWaiters = []
+        for waiter in waiters { waiter.resume() }
     }
 }
 

@@ -5,11 +5,10 @@ import Testing
 
 /// Executes the shared ScreenInteraction conformance vectors
 /// (``sdks/cosmo-realtime/contract/screen-interaction-vectors.json``) against the
-/// Swift ``ScreenInteractionBridge``. Python is the reference conformer; Swift,
-/// Python, and TS all run the same file, so a wire-contract drift (capture
-/// cache, published payload, activate/highlight resolution) fails CI in
-/// whichever SDK disagrees. The Swift mirror of
-/// `test_screen_interaction_conformance.py`.
+/// Swift ``ScreenInteractionBridge``. Swift and TS both run the same file, so a
+/// wire-contract drift (capture cache, published payload, activate/highlight
+/// resolution) fails CI in whichever SDK disagrees. The TS mirror is
+/// `screen_interaction_conformance.test.ts`.
 @Suite struct ScreenInteractionConformanceTests {
 
     // MARK: - Vector model

@@ -190,6 +190,19 @@ public struct TranscriptReducer: Sendable {
         }
     }
 
+    /// Apply one ``RealtimeSession/Event`` — what ``RealtimeSession/events``
+    /// yields. Events with no transcript representation (speaking phases,
+    /// model text, reconnects) fold to nothing.
+    ///
+    /// Labelled rather than overloading ``reduce(_:)``: the two event enums
+    /// share case names, so an unlabelled overload makes every existing
+    /// leading-dot call site (`reduce(.pong)`) ambiguous.
+    @discardableResult
+    public mutating func reduce(sessionEvent: RealtimeSession.Event) -> [UUID] {
+        guard let narrowed = ServerEvent(sessionEvent) else { return [] }
+        return reduce(narrowed)
+    }
+
     /// Returns the ids of lines inserted, mutated, or removed (0 or 1).
     private mutating func reduceTranscript(_ transcript: Transcript) -> [UUID] {
         // Per `RealtimeModelEventTranscript` contract: append deltas, replace on final.

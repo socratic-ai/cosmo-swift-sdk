@@ -25,7 +25,7 @@ public struct SessionConfig: Sendable, Equatable {
     /// ``[a-z0-9-]``, e.g. ``"driver-pay"``). The stored agent config runs
     /// verbatim; a stored-config agent field set alongside the handle
     /// throws ``RealtimeSessionError/invalidPayload(_:)`` at start — only
-    /// ``agentInputs``, ``tools``, and ``speakingStyle`` may accompany it.
+    /// ``agentInputs``, ``tools``, and ``voice`` may accompany it.
     /// ``nil`` runs the inline per-field config with no catalog agent.
     public var agentName: String?
     /// String inputs for the referenced agent (template placeholders).
@@ -40,22 +40,16 @@ public struct SessionConfig: Sendable, Equatable {
     /// so an illegal pairing is unrepresentable. ``nil`` keeps every provider
     /// default; ``model`` selects the concrete model within the provider.
     public var modelOptions: ModelOptions?
-    /// Provider-specific prebuilt voice id. When ``nil`` the upstream
-    /// picks per session — the voice then drifts between connects.
-    public var voice: String?
-    /// Whether the agent emits audio. ``false`` runs the session
-    /// text-only: no speech is produced while input transcription and
-    /// text output are unaffected — for transcription, captioning, or
-    /// text-response apps. Rejected at session start when the resolved
-    /// model cannot run text-only (self-contained speech-to-speech
-    /// providers). ``nil`` keeps the server default (on).
-    public var audioOutput: Bool?
+    /// How the agent sounds — prebuilt voice id and speaking style.
+    /// ``nil`` keeps the server defaults for both.
+    public var voice: Voice?
+    /// The agent's audio pipeline — output emission, inbound noise
+    /// cancellation, and the ambience bed. ``nil`` keeps every server
+    /// default (audio on, no cancellation, no ambience).
+    public var audio: Audio?
     /// System instructions. Replaces the server's neutral default when
     /// set.
     public var instructions: String?
-    /// A "how to speak" instruction appended to the system prompt (e.g. warm /
-    /// delivery / human, or any caller text). ``nil`` keeps the server default.
-    public var speakingStyle: String?
     /// Tool set for the session: client-executed specs this client
     /// fulfils locally, plus opt-in server tools by name. ``nil`` (the
     /// default) inherits the client-level default tools; an explicit empty
@@ -65,9 +59,6 @@ public struct SessionConfig: Sendable, Equatable {
     /// How readily the user's speech interrupts the agent. ``nil`` keeps
     /// the server default.
     public var interruptionSensitivity: InterruptionSensitivity?
-    /// Enable upstream noise cancellation on the input audio. ``nil``
-    /// keeps the server default (off).
-    public var noiseCancellationEnabled: Bool?
     /// Opening line the assistant speaks first, voiced server-side as soon
     /// as the model session opens — before the client even receives
     /// ``ready``. ``nil`` keeps the wait-for-user behavior.
@@ -105,13 +96,11 @@ public struct SessionConfig: Sendable, Equatable {
         agentInputs: [String: String]? = nil,
         model: String? = nil,
         modelOptions: ModelOptions? = nil,
-        voice: String? = nil,
-        audioOutput: Bool? = nil,
+        voice: Voice? = nil,
+        audio: Audio? = nil,
         instructions: String? = nil,
-        speakingStyle: String? = nil,
         tools: [Tool]? = nil,
         interruptionSensitivity: InterruptionSensitivity? = nil,
-        noiseCancellationEnabled: Bool? = nil,
         greeting: String? = nil,
         resumeSessionId: String? = nil,
         maxSessionSeconds: Int? = nil,
@@ -123,12 +112,10 @@ public struct SessionConfig: Sendable, Equatable {
         self.model = model
         self.modelOptions = modelOptions
         self.voice = voice
-        self.audioOutput = audioOutput
+        self.audio = audio
         self.instructions = instructions
-        self.speakingStyle = speakingStyle
         self.tools = tools
         self.interruptionSensitivity = interruptionSensitivity
-        self.noiseCancellationEnabled = noiseCancellationEnabled
         self.greeting = greeting
         self.resumeSessionId = resumeSessionId
         self.maxSessionSeconds = maxSessionSeconds
@@ -144,18 +131,101 @@ public struct SessionConfig: Sendable, Equatable {
             && lhs.model == rhs.model
             && lhs.modelOptions == rhs.modelOptions
             && lhs.voice == rhs.voice
-            && lhs.audioOutput == rhs.audioOutput
+            && lhs.audio == rhs.audio
             && lhs.instructions == rhs.instructions
-            && lhs.speakingStyle == rhs.speakingStyle
             && lhs.tools == rhs.tools
             && lhs.interruptionSensitivity == rhs.interruptionSensitivity
-            && lhs.noiseCancellationEnabled == rhs.noiseCancellationEnabled
             && lhs.greeting == rhs.greeting
             && lhs.resumeSessionId == rhs.resumeSessionId
             && lhs.maxSessionSeconds == rhs.maxSessionSeconds
             && lhs.storeRecording == rhs.storeRecording
             && lhs.serverHooks == rhs.serverHooks
             && lhs.declaresScreenInteraction == rhs.declaresScreenInteraction
+    }
+
+    /// How the agent sounds: the prebuilt voice and the per-run speaking
+    /// style.
+    public struct Voice: Sendable, Equatable {
+        /// Provider-specific prebuilt voice id. ``nil`` lets the upstream
+        /// pick per session — the voice then drifts between connects.
+        public var name: String?
+        /// A "how to speak" instruction appended to the system prompt (e.g.
+        /// warm / delivery / human, or any caller text). ``nil`` keeps the
+        /// server default.
+        public var speakingStyle: String?
+
+        public init(name: String? = nil, speakingStyle: String? = nil) {
+            self.name = name
+            self.speakingStyle = speakingStyle
+        }
+
+        /// ``nil`` when nothing is set, so an empty block stays off the wire.
+        var wire: CosmoRealtimeAPI.Components.Schemas.RealtimeVoiceConfig? {
+            if name == nil && speakingStyle == nil { return nil }
+            return .init(name: name, speakingStyle: speakingStyle)
+        }
+    }
+
+    /// Background-ambience bed mixed into the assistant's OUTPUT audio.
+    /// Presence of the object enables the bed; leave ``Audio/ambience``
+    /// ``nil`` for none.
+    public struct Ambience: Sendable, Equatable {
+        /// Named ambience bed to play (e.g. ``"office"``); ``nil`` uses the
+        /// default bed.
+        public var track: String?
+        /// Bed level relative to full scale (dB, -60..0); sits under speech.
+        /// ``nil`` keeps the server default.
+        public var gainDb: Double?
+
+        public init(track: String? = nil, gainDb: Double? = nil) {
+            self.track = track
+            self.gainDb = gainDb
+        }
+
+        /// Never ``nil`` — presence is what enables the bed, so an empty
+        /// object still crosses the wire.
+        var wire: CosmoRealtimeAPI.Components.Schemas.RealtimeAmbienceConfig {
+            .init(gainDb: gainDb, track: track.flatMap { .init(rawValue: $0) })
+        }
+    }
+
+    /// The agent's audio pipeline, configured once — not per run.
+    public struct Audio: Sendable, Equatable {
+        /// Whether the agent emits audio. ``false`` runs the session
+        /// text-only: no speech is produced while input transcription and
+        /// text output are unaffected. Rejected at session start when the
+        /// resolved model cannot run text-only (self-contained
+        /// speech-to-speech providers). ``nil`` keeps the server default
+        /// (on).
+        public var output: Bool?
+        /// Enable upstream noise cancellation on the input audio. ``nil``
+        /// keeps the server default (off).
+        public var noiseCancellation: Bool?
+        /// Background-ambience bed on the assistant's output; present =
+        /// enabled.
+        public var ambience: Ambience?
+
+        public init(
+            output: Bool? = nil,
+            noiseCancellation: Bool? = nil,
+            ambience: Ambience? = nil
+        ) {
+            self.output = output
+            self.noiseCancellation = noiseCancellation
+            self.ambience = ambience
+        }
+
+        /// ``nil`` when nothing is set, so an empty block stays off the wire.
+        var wire: CosmoRealtimeAPI.Components.Schemas.RealtimeAudioConfig? {
+            if output == nil && noiseCancellation == nil && ambience == nil {
+                return nil
+            }
+            return .init(
+                ambience: ambience?.wire,
+                noiseCancellation: noiseCancellation,
+                output: output
+            )
+        }
     }
 
     /// Re-exposed generated enum so consumers never spell the
@@ -254,14 +324,14 @@ public struct SessionConfig: Sendable, Equatable {
         /// freshest camera/screen frame at full resolution). Zero-config;
         /// resolved-flow vocabulary.
         case examineImage
-        /// Opt-in to the server-executed object locator that returns boxes.
-        /// Pairs with a client renderer (`draw_after_detect`): the model
-        /// picks one of the candidates and passes it on. Zero-config;
-        /// resolved-flow vocabulary.
-        case detect
-        /// The point-returning sibling of ``detect``, pairing with
+        /// Opt-in to the server-executed object locator that returns boxes —
+        /// one per matching instance. Pairs with a client renderer
+        /// (`draw_after_detect`): the model picks one of the candidates and
+        /// passes it on. Zero-config; resolved-flow vocabulary.
+        case detectObjects
+        /// The point-returning sibling of ``detectObjects``, pairing with
         /// `draw_after_point`.
-        case point
+        case pointAtObject
 
         public var name: String {
             switch self {
@@ -269,8 +339,8 @@ public struct SessionConfig: Sendable, Equatable {
             case let .backgroundClient(name, _, _, _): return name
             case .webSearch: return "web_search"
             case .examineImage: return "examine_image"
-            case .detect: return "cosmo_detect"
-            case .point: return "cosmo_point"
+            case .detectObjects: return "cosmo_detect_objects"
+            case .pointAtObject: return "cosmo_point_at_object"
             }
         }
 
@@ -283,7 +353,7 @@ public struct SessionConfig: Sendable, Equatable {
             case let (.backgroundClient(ln, ld, lp, _), .backgroundClient(rn, rd, rp, _)):
                 return ln == rn && ld == rd && lp == rp
             case (.webSearch, .webSearch), (.examineImage, .examineImage),
-                (.detect, .detect), (.point, .point):
+                (.detectObjects, .detectObjects), (.pointAtObject, .pointAtObject):
                 return true
             default:
                 return false
@@ -328,11 +398,9 @@ extension SessionConfig {
             let storedConfigFields: [(String, Bool)] = [
                 ("model", model != nil),
                 ("modelOptions", modelOptions != nil),
-                ("voice", voice != nil),
-                ("audioOutput", audioOutput != nil),
+                ("audio", audio != nil),
                 ("instructions", instructions != nil),
                 ("interruptionSensitivity", interruptionSensitivity != nil),
-                ("noiseCancellationEnabled", noiseCancellationEnabled != nil),
                 ("greeting", greeting != nil),
                 ("hooks (server)", !(serverHooks ?? []).isEmpty),
             ]
@@ -352,9 +420,9 @@ extension SessionConfig {
                 .init(
                     inputs: agentInputs.map { .init(additionalProperties: $0) },
                     name: agentName,
-                    speakingStyle: speakingStyle,
                     tools: wireTools,
-                    _type: .catalog
+                    _type: .catalog,
+                    voice: voice?.wire
                 )
             )
         } else {
@@ -369,18 +437,16 @@ extension SessionConfig {
                 ]
             }
             let inline = CosmoRealtimeAPI.Components.Schemas.RealtimeInlineAgentConfig(
-                audioOutput: audioOutput,
+                audio: audio?.wire,
                 greeting: greeting,
                 hooks: serverHooks,
                 instructions: instructions,
                 interruptionSensitivity: interruptionSensitivity,
                 model: model,
                 modelOptions: modelOptions?.wire,
-                noiseCancellationEnabled: noiseCancellationEnabled,
-                speakingStyle: speakingStyle,
                 tools: wireTools,
                 _type: .inline,
-                voice: voice
+                voice: voice?.wire
             )
             // An inline block carrying only its tag is the neutral default
             // agent — omit the block entirely.
@@ -448,10 +514,10 @@ extension SessionConfig.Tool {
             return .webSearch(.init(kind: .webSearch))
         case .examineImage:
             return .examineImage(.init(kind: .examineImage))
-        case .detect:
-            return .detect(.init(kind: .detect))
-        case .point:
-            return .point(.init(kind: .point))
+        case .detectObjects:
+            return .detectObjects(.init(kind: .detectObjects))
+        case .pointAtObject:
+            return .pointAtObject(.init(kind: .pointAtObject))
         }
     }
 
@@ -473,10 +539,10 @@ extension SessionConfig.Tool {
             return .webSearch(.init(kind: .webSearch))
         case .examineImage:
             return .examineImage(.init(kind: .examineImage))
-        case .detect:
-            return .detect(.init(kind: .detect))
-        case .point:
-            return .point(.init(kind: .point))
+        case .detectObjects:
+            return .detectObjects(.init(kind: .detectObjects))
+        case .pointAtObject:
+            return .pointAtObject(.init(kind: .pointAtObject))
         }
     }
 }

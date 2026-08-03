@@ -358,4 +358,32 @@ import CosmoRealtime
 
         #expect(reducer.lines.isEmpty)
     }
+
+    // MARK: - RealtimeSession.Event
+
+    /// ``RealtimeSession/events`` is the documented stream, so the reducer has
+    /// to fold what it yields — not only the ``ServerEvent`` the app wrapper
+    /// emits. Same reduction rules, one narrowing step.
+    @Test func sessionTranscriptEventsFoldWithTheSameRules() {
+        func delta(_ text: String, isFinal: Bool) -> RealtimeSession.Event {
+            .transcript(RealtimeSession.TranscriptDelta(
+                isFinal: isFinal, role: .assistant, text: text, _type: .transcript
+            ))
+        }
+        var reducer = TranscriptReducer()
+        reducer.reduce(sessionEvent: delta("Hel", isFinal: false))
+        reducer.reduce(sessionEvent: delta("lo", isFinal: false))
+        #expect(reducer.lines.map(\.text) == ["Hello"])
+
+        reducer.reduce(sessionEvent: delta("Hello there", isFinal: true))
+        #expect(reducer.lines.map(\.text) == ["Hello there"])
+    }
+
+    @Test func sessionEventsWithoutATranscriptRepresentationFoldToNothing() {
+        var reducer = TranscriptReducer()
+        #expect(reducer.reduce(sessionEvent: .botStartedSpeaking).isEmpty)
+        #expect(reducer.reduce(sessionEvent: .userStartedSpeaking).isEmpty)
+        #expect(reducer.reduce(sessionEvent: .unknown(rawType: "future-event", payload: Data())).isEmpty)
+        #expect(reducer.lines.isEmpty)
+    }
 }

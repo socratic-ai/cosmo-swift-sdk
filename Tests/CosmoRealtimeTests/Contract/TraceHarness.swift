@@ -346,10 +346,22 @@ func sessionConfig(fromTrace config: [String: JSONValue]) throws -> SessionConfi
     for (key, value) in config {
         switch (key, value) {
         case ("model", .string(let v)): result.model = v
-        case ("voice", .string(let v)): result.voice = v
+        case ("voice", .object(let fields)):
+            var voice = SessionConfig.Voice()
+            if case .string(let name)? = fields["name"] { voice.name = name }
+            if case .string(let style)? = fields["speaking_style"] {
+                voice.speakingStyle = style
+            }
+            result.voice = voice
         case ("instructions", .string(let v)): result.instructions = v
         case ("resume_session_id", .string(let v)): result.resumeSessionId = v
-        case ("noise_cancellation_enabled", .bool(let v)): result.noiseCancellationEnabled = v
+        case ("audio", .object(let fields)):
+            var audio = SessionConfig.Audio()
+            if case .bool(let output)? = fields["output"] { audio.output = output }
+            if case .bool(let cancellation)? = fields["noise_cancellation"] {
+                audio.noiseCancellation = cancellation
+            }
+            result.audio = audio
         case ("interruption_sensitivity", .string(let v)):
             guard let sensitivity = SessionConfig.InterruptionSensitivity(rawValue: v) else {
                 throw TraceDriverError.unsupported("interruption_sensitivity \(v)")
@@ -398,6 +410,11 @@ func performClientSend(_ message: [String: JSONValue], on session: RealtimeSessi
             throw TraceDriverError.unsupported("send-text message \(message)")
         }
         try await session.send(text: content)
+    case "send-context":
+        guard case .string(let content)? = message["content"] else {
+            throw TraceDriverError.unsupported("send-context message \(message)")
+        }
+        try await session.send(context: content)
     case "mute":
         guard case .bool(let muted)? = message["muted"] else {
             throw TraceDriverError.unsupported("mute message \(message)")

@@ -30,34 +30,46 @@ struct SessionConfigTests {
         }
     }
 
-    @Test("noise cancellation stays off the wire when unset, even with other agent fields set")
-    func noiseCancellationAbsentWhenUnset() throws {
+    @Test("the audio block stays off the wire when unset, even with other agent fields set")
+    func audioAbsentWhenUnset() throws {
         // The agent block is present (instructions set), but an unset
-        // noiseCancellationEnabled must not put the key on the wire — the
-        // server only defaults it on when the field is absent from
-        // ``model_fields_set``.
-        let fields = try encodedFields(
-            SessionConfig(instructions: "Be terse.", noiseCancellationEnabled: nil)
-        )
+        // ``audio`` must not put the key on the wire — the server only
+        // defaults noise cancellation on when the knob is absent from the
+        // audio block's ``model_fields_set``.
+        let fields = try encodedFields(SessionConfig(instructions: "Be terse."))
         guard let agent = object(fields, "agent") else {
             Issue.record("expected an agent sub-object, got \(String(describing: fields["agent"]))")
             return
         }
         #expect(agent["instructions"] == .string("Be terse."))
         #expect(
-            agent["noise_cancellation_enabled"] == nil,
-            "unset noise cancellation must stay off the wire so the server default applies"
+            agent["audio"] == nil,
+            "unset audio must stay off the wire so the server defaults apply"
         )
     }
 
     @Test("explicit noise-cancellation false is emitted so it wins over the server default")
     func explicitNoiseCancellationFalseIsEmitted() throws {
-        let fields = try encodedFields(SessionConfig(noiseCancellationEnabled: false))
+        let fields = try encodedFields(
+            SessionConfig(audio: .init(noiseCancellation: false))
+        )
         guard let agent = object(fields, "agent") else {
             Issue.record("expected an agent sub-object, got \(String(describing: fields["agent"]))")
             return
         }
-        #expect(agent["noise_cancellation_enabled"] == .bool(false))
+        #expect(agent["audio"] == .object(["noise_cancellation": .bool(false)]))
+    }
+
+    @Test("an empty ambience object survives serialization — presence enables the bed")
+    func emptyAmbienceObjectSurvives() throws {
+        let fields = try encodedFields(
+            SessionConfig(audio: .init(ambience: .init()))
+        )
+        guard let agent = object(fields, "agent") else {
+            Issue.record("expected an agent sub-object, got \(String(describing: fields["agent"]))")
+            return
+        }
+        #expect(agent["audio"] == .object(["ambience": .object([:])]))
     }
 
     @Test("set fields serialize under their wire names, nested by scope")
@@ -67,10 +79,9 @@ struct SessionConfigTests {
                 model: "gemini-live",
                 modelOptions: .gemini(
                     temperature: 0.7, maxOutputTokens: 4096, thinkingLevel: .high),
-                voice: "Puck",
-                audioOutput: false,
+                voice: .init(name: "Puck", speakingStyle: "Talk warmly."),
+                audio: .init(output: false, noiseCancellation: true),
                 instructions: "Be terse.",
-                speakingStyle: "Talk warmly.",
                 tools: [
                     .client(
                         name: "get_local_time",
@@ -80,7 +91,6 @@ struct SessionConfigTests {
                     .webSearch,
                 ],
                 interruptionSensitivity: .high,
-                noiseCancellationEnabled: true,
                 greeting: "Hi, I'm Cosmo.",
                 resumeSessionId: "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
                 storeRecording: false
@@ -102,14 +112,20 @@ struct SessionConfigTests {
         #expect(modelOptions["temperature"] == .double(0.7))
         #expect(modelOptions["max_output_tokens"] == .int(4096))
         #expect(modelOptions["thinking_level"] == .string("high"))
-        #expect(agent["voice"] == .string("Puck"))
-        #expect(agent["audio_output"] == .bool(false))
+        #expect(
+            agent["voice"]
+                == .object([
+                    "name": .string("Puck"), "speaking_style": .string("Talk warmly."),
+                ])
+        )
         #expect(agent["instructions"] == .string("Be terse."))
-        #expect(agent["speaking_style"] == .string("Talk warmly."))
         #expect(agent["interruption_sensitivity"] == .string("high"))
         #expect(agent["greeting"] == .string("Hi, I'm Cosmo."))
-        // Audio is agent config, so noise cancellation nests under `agent`.
-        #expect(agent["noise_cancellation_enabled"] == .bool(true))
+        // Audio is agent config, so the audio block nests under `agent`.
+        #expect(
+            agent["audio"]
+                == .object(["output": .bool(false), "noise_cancellation": .bool(true)])
+        )
         // Session-scoped knobs nest under `session`; resume_session_id rides
         // under the experimental knobs object inside it.
         guard let session = object(fields, "session") else {
@@ -193,10 +209,24 @@ struct SessionConfigTests {
 
     @Test("a stored-config field alongside a catalog launch throws instead of riding along")
     func storedConfigFieldWithCatalogAgentThrows() throws {
-        let config = SessionConfig(agentName: "driver-pay", voice: "Puck")
+        let config = SessionConfig(
+            agentName: "driver-pay", audio: .init(noiseCancellation: true)
+        )
         #expect(throws: RealtimeSessionError.self) {
             try config.wirePayload()
         }
+    }
+
+    @Test("the per-run voice rides alongside a catalog launch")
+    func catalogVoiceRidesAlong() throws {
+        let fields = try encodedFields(
+            SessionConfig(agentName: "driver-pay", voice: .init(name: "Puck"))
+        )
+        guard let agent = object(fields, "agent") else {
+            Issue.record("expected an agent sub-object, got \(String(describing: fields["agent"]))")
+            return
+        }
+        #expect(agent["voice"] == .object(["name": .string("Puck")]))
     }
 
     @Test("dictation composes audioOutput=false and strips every tool")
@@ -218,11 +248,12 @@ struct SessionConfigTests {
             thinkingLevel: nil,
             connectGreeting: nil,
             systemPrompt: "Transcribe only.",
+            speakingStyle: nil,
             agentName: nil,
             dictation: true,
             screenInteractionEnabled: false
         )
-        #expect(config.audioOutput == false)
+        #expect(config.audio?.output == false)
         #expect(config.tools == nil, "dictation must strip every tool")
     }
 
@@ -240,11 +271,77 @@ struct SessionConfigTests {
             thinkingLevel: nil,
             connectGreeting: nil,
             systemPrompt: nil,
+            speakingStyle: nil,
             agentName: nil,
             dictation: false,
             screenInteractionEnabled: false
         )
-        #expect(config.audioOutput == nil)
+        #expect(config.audio == nil)
+    }
+
+    private func namedUserConfig(agentName: String?) throws -> SessionConfig {
+        try VoiceSession.makeConfig(
+            declaredTools: nil,
+            backgroundClientToolHandlers: nil,
+            voiceName: nil,
+            resumeFromCallId: nil,
+            providerPreference: nil,
+            noiseCancellationEnabled: nil,
+            storeRecording: true,
+            interruptionSensitivity: nil,
+            thinkingLevel: nil,
+            connectGreeting: ConnectGreeting.openingLine(userDisplayName: "Utkarsh Ranjan"),
+            systemPrompt: "You are Cosmo.",
+            speakingStyle: ConnectGreeting.nameDirective(
+                userDisplayName: "Utkarsh Ranjan", dictation: false
+            ),
+            agentName: agentName,
+            dictation: false,
+            screenInteractionEnabled: false
+        )
+    }
+
+    /// The whole config a named user's session goes out with: the greeting is
+    /// the spoken line only, and the name directive rides
+    /// `voice.speakingStyle`. The server voices `greeting` verbatim, so a
+    /// directive that leaks into it is read aloud to the user.
+    @Test("a named user's config keeps directives out of the spoken greeting")
+    func namedUserConfigSeparatesGreetingFromDirective() throws {
+        let config = try namedUserConfig(agentName: nil)
+        #expect(config.greeting == "Hey Utkarsh, Cosmo here!")
+        #expect(config.instructions == "You are Cosmo.")
+        #expect(
+            config.voice?.speakingStyle?.contains(
+                #"The user's name is "Utkarsh Ranjan"."#) == true
+        )
+    }
+
+    /// A catalog agent runs its stored config verbatim, so `instructions` and
+    /// `greeting` are dropped — but the speaking style is a per-run
+    /// ride-along the server accepts alongside it (on the `voice` block),
+    /// which is why the name directive lives there. Riding `instructions`
+    /// would lose the name on this path entirely.
+    @Test("the name directive survives a catalog agent, which drops instructions")
+    func nameDirectiveRidesAlongsideACatalogAgent() throws {
+        let config = try namedUserConfig(agentName: "maya")
+        #expect(config.instructions == nil)
+        #expect(config.greeting == nil)
+        #expect(
+            config.voice?.speakingStyle?.contains(
+                #"The user's name is "Utkarsh Ranjan"."#) == true
+        )
+
+        // The wire payload rejects stored-config fields for a catalog agent;
+        // the voice block's speaking style must not be one of them.
+        let agent = object(try encodedFields(config), "agent")
+        let voice = agent.flatMap { fields -> [String: JSONValue]? in
+            guard case .object(let inner)? = fields["voice"] else { return nil }
+            return inner
+        }
+        #expect(
+            voice?["speaking_style"]
+                == config.voice?.speakingStyle.map { .string($0) }
+        )
     }
 }
 
@@ -253,7 +350,7 @@ extension SessionConfigTests {
     func typedServerOptInsSerializeAsKinds() throws {
         var config = SessionConfig(
             instructions: "Be helpful.",
-            tools: [.webSearch, .examineImage, .detect, .point]
+            tools: [.webSearch, .examineImage, .detectObjects, .pointAtObject]
         )
         config.declaresScreenInteraction = true
         let fields = try encodedFields(config)
@@ -277,8 +374,8 @@ extension SessionConfigTests {
             kinds == [
                 .string("web_search"),
                 .string("examine_image"),
-                .string("detect"),
-                .string("point"),
+                .string("detect_objects"),
+                .string("point_at_object"),
                 .string("screen_interaction"),
             ]
         )
@@ -298,6 +395,7 @@ extension SessionConfigTests {
             thinkingLevel: nil,
             connectGreeting: nil,
             systemPrompt: nil,
+            speakingStyle: nil,
             agentName: nil,
             dictation: false,
             screenInteractionEnabled: true
@@ -306,7 +404,7 @@ extension SessionConfigTests {
         // The locator pair rides every session too — pointing must not depend
         // on an agent carrying them in builtin_tool_names. Asserted as an exact
         // list so a cutover that rewrites this block can't drop them silently.
-        #expect(bare.tools == [.webSearch, .examineImage, .detect, .point])
+        #expect(bare.tools == [.webSearch, .examineImage, .detectObjects, .pointAtObject])
 
         let dictation = try VoiceSession.makeConfig(
             declaredTools: nil,
@@ -320,6 +418,7 @@ extension SessionConfigTests {
             thinkingLevel: nil,
             connectGreeting: nil,
             systemPrompt: nil,
+            speakingStyle: nil,
             agentName: nil,
             dictation: true,
             screenInteractionEnabled: true

@@ -70,33 +70,18 @@ public final class VoiceSessionModel {
 
     private let settings: VoiceSettingsStore
 
-    /// Base first-turn instruction sent on connect so the agent
-    /// introduces itself. Skipped on resumed sessions.
-    static let baseConnectGreeting = ConnectGreeting.base
-
-    /// Host-supplied replacement for the default first-turn greeting
-    /// instruction. Set before ``start``; nil keeps the default.
+    /// Host-supplied replacement for the default opening line. Set before
+    /// ``start``; nil keeps the default, empty opens silently.
     public var connectGreetingOverride: String?
 
-    /// Preferred name Cosmo addresses the user by, supplied by the
-    /// host (already sanitized — e.g. ``AppModel.sanitizedDisplayName``).
-    /// When set, ``connectGreeting`` prepends a name directive so the
-    /// model uses it on the very first turn; memory carries it on
-    /// later sessions but isn't seeded until conversation builds it.
+    /// Preferred name Cosmo addresses the user by. Reaches the model through
+    /// the persona on every session, and by first name in ``connectGreeting``
+    /// on the sessions that actually greet — a dictation session gets neither.
     public var userDisplayName: String?
 
-    /// Composed first-turn instruction. Falls back to
-    /// ``baseConnectGreeting`` when no name is set. The "occasionally /
-    /// when it feels natural" wording is intentional: instructing the
-    /// model to use the name freely makes it sycophantic ("Sure,
-    /// Utkarsh!" every turn). The directive is scoped to spoken replies:
-    /// without the boundary the model interpolates the name into text it
-    /// types or dictates into the user's apps.
+    /// The opening line the server voices verbatim at model-session open.
     var connectGreeting: String {
-        guard let name = userDisplayName, !name.isEmpty else {
-            return Self.baseConnectGreeting
-        }
-        return "The user's name is \(name). Greet them by name. Address them by name occasionally in spoken replies when it feels natural — never insert their name into text you type or dictate into their apps unless they actually said it. \(Self.baseConnectGreeting)"
+        ConnectGreeting.openingLine(userDisplayName: userDisplayName)
     }
 
     public var geminiVoice: GeminiVoice {
@@ -231,7 +216,7 @@ public final class VoiceSessionModel {
     /// User text turns submitted before the session is live, echoed into the
     /// transcript immediately and flushed to the wire on ``.ready``. Each keeps
     /// the echoed line's id so a failed flush can flag that bubble.
-    private var pendingTexts: [(id: UUID, text: String, audioResponse: Bool)] = []
+    private var pendingTexts: [(id: UUID, text: String)] = []
 
     private var session: VoiceSession?
     private var eventsTask: Task<Void, Never>?
@@ -410,6 +395,9 @@ public final class VoiceSessionModel {
                     thinkingLevel: self.settings.thinkingLevel,
                     connectGreeting: greeting,
                     systemPrompt: systemPrompt,
+                    speakingStyle: ConnectGreeting.nameDirective(
+                        userDisplayName: self.userDisplayName, dictation: dictation
+                    ),
                     agentName: agentName,
                     dictation: dictation,
                     micMuted: micMuted,
@@ -578,21 +566,19 @@ public final class VoiceSessionModel {
     /// typically ``start(micMuted: true)`` for type-before-you-talk. A failed
     /// wire send flags the echoed bubble ``deliveryFailed`` so the user knows
     /// the model never received it.
-    ///
-    /// `audioResponse: false` requests a text-only reply (no TTS) for this turn.
-    public func sendText(_ content: String, audioResponse: Bool = true) {
+    public func sendText(_ content: String) {
         let lineId = reducer.appendUserText(content)
         publishTranscript()
 
         guard case .live = state, let session else {
             // Queued before live: the model has no floor to hold yet. The flush
             // hands it over.
-            pendingTexts.append((lineId, content, audioResponse))
+            pendingTexts.append((lineId, content))
             return
         }
         Task { @MainActor [weak self] in
             do {
-                try await session.sendText(content, audioResponse: audioResponse)
+                try await session.sendText(content)
             } catch {
                 Self.log.error("text turn send failed: \(error.localizedDescription, privacy: .public)")
                 self?.reducer.markDeliveryFailed(id: lineId)
@@ -614,7 +600,7 @@ public final class VoiceSessionModel {
         Task { @MainActor [weak self] in
             for item in pending {
                 do {
-                    try await session.sendText(item.text, audioResponse: item.audioResponse)
+                    try await session.sendText(item.text)
                 } catch {
                     Self.log.error("queued text flush failed: \(error.localizedDescription, privacy: .public)")
                     self?.reducer.markDeliveryFailed(id: item.id)

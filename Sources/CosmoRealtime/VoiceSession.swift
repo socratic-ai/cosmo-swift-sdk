@@ -73,6 +73,7 @@ public actor VoiceSession {
         thinkingLevel: String? = nil,
         connectGreeting: String? = nil,
         systemPrompt: String? = nil,
+        speakingStyle: String? = nil,
         agentName: String? = nil,
         dictation: Bool = false,
         micMuted: Bool = false,
@@ -95,6 +96,7 @@ public actor VoiceSession {
             thinkingLevel: thinkingLevel,
             connectGreeting: connectGreeting,
             systemPrompt: systemPrompt,
+            speakingStyle: speakingStyle,
             agentName: agentName,
             dictation: dictation,
             micMuted: micMuted,
@@ -161,10 +163,15 @@ public actor VoiceSession {
         sessionBox.withLock { $0?.qoeSnapshot } ?? Self.emptyQoESnapshot
     }
 
-    /// Send a user text turn. `audioResponse: false` requests a text-only reply
-    /// (e.g. a tool-only turn like a recap request) — no spoken audio.
-    public func sendText(_ content: String, audioResponse: Bool = true) async throws {
-        try await requireSession().send(text: content, audioResponse: audioResponse)
+    /// Send a user text turn.
+    public func sendText(_ content: String) async throws {
+        try await requireSession().send(text: content)
+    }
+
+    /// Give the agent context without asking it anything — no turn, no
+    /// speech, no transcript entry. See ``RealtimeSession/send(context:)``.
+    public func sendContext(_ content: String) async throws {
+        try await requireSession().send(context: content)
     }
 
     public func sendMute(_ muted: Bool) async throws {
@@ -281,6 +288,7 @@ public actor VoiceSession {
         thinkingLevel: String?,
         connectGreeting: String?,
         systemPrompt: String?,
+        speakingStyle: String?,
         agentName: String?,
         dictation: Bool,
         micMuted: Bool,
@@ -318,6 +326,7 @@ public actor VoiceSession {
             thinkingLevel: thinkingLevel,
             connectGreeting: connectGreeting,
             systemPrompt: systemPrompt,
+            speakingStyle: speakingStyle,
             agentName: agentName,
             dictation: dictation,
             screenInteractionEnabled: screenInteraction != nil
@@ -621,6 +630,7 @@ public actor VoiceSession {
         thinkingLevel: String?,
         connectGreeting: String?,
         systemPrompt: String?,
+        speakingStyle: String?,
         agentName: String?,
         dictation: Bool,
         screenInteractionEnabled: Bool
@@ -649,8 +659,8 @@ public actor VoiceSession {
         toolSpecs.append(.examineImage)
         // The locators behind the app's draw_after_detect / draw_after_point
         // renderers — requested here so pointing needs no particular agent.
-        toolSpecs.append(.detect)
-        toolSpecs.append(.point)
+        toolSpecs.append(.detectObjects)
+        toolSpecs.append(.pointAtObject)
         // Dictation is not a wire concept: it composes from the generic
         // primitives — an empty tool set so the model can only listen, plus
         // ``audioOutput=false`` so it never speaks. The host supplies the
@@ -660,16 +670,29 @@ public actor VoiceSession {
         // server rejects stored-config agent fields alongside ``agent.name``,
         // so only the exempt client tools ride along.
         let inline = agentName == nil
+        let audio: SessionConfig.Audio? = {
+            let output: Bool? = dictation ? false : nil
+            let cancellation = inline ? noiseCancellationEnabled : nil
+            if output == nil && cancellation == nil { return nil }
+            return .init(output: output, noiseCancellation: cancellation)
+        }()
+        // The style half is not gated on ``inline``: the server accepts a
+        // speaking style alongside a catalog agent's stored config, so a
+        // caller directive (e.g. the user's name) rides a stored agent too.
+        let voice: SessionConfig.Voice? = {
+            let name = inline ? voiceName : nil
+            if name == nil && speakingStyle == nil { return nil }
+            return .init(name: name, speakingStyle: speakingStyle)
+        }()
         var config = SessionConfig(
             agentName: agentName,
             model: inline ? providerPreference : nil,
             modelOptions: inline ? thinking.map { .gemini(thinkingLevel: $0) } : nil,
-            voice: inline ? voiceName : nil,
-            audioOutput: dictation ? false : nil,
+            voice: voice,
+            audio: audio,
             instructions: inline ? systemPrompt : nil,
             tools: toolSpecs.isEmpty ? nil : toolSpecs,
             interruptionSensitivity: inline ? sensitivity : nil,
-            noiseCancellationEnabled: inline ? noiseCancellationEnabled : nil,
             greeting: greeting,
             resumeSessionId: resumeFromCallId,
             storeRecording: storeRecording
@@ -690,8 +713,9 @@ public actor VoiceSession {
     /// registered separately via ``makeRpcHandlers``, keyed by
     /// ``clientToolMethods``). The opt-in server tools (web search, frame
     /// inspection, the desktop-control tier) are appended as typed opt-in
-    /// specs (``.webSearch`` / ``.examineImage`` / ``.detect`` / ``.point``)
-    /// in ``makeConfig``, not here, and registry tools are resolved
+    /// specs (``.webSearch`` / ``.examineImage`` / ``.detectObjects`` /
+    /// ``.pointAtObject``) in ``makeConfig``, not here, and registry tools
+    /// are resolved
     /// server-side. The legacy tool-name roster is not forwarded (see
     /// ``_connect``).
     static func makeTools(

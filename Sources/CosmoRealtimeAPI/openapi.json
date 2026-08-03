@@ -91,6 +91,45 @@
         "title": "MintTokenResponse",
         "type": "object"
       },
+      "RealtimeAmbienceConfig": {
+        "additionalProperties": false,
+        "description": "Background-ambience bed mixed into the assistant's OUTPUT audio\n(server-side allowlist; additionally gated by the ops flag). Presence of\nthis object enables the bed; omit it for none. Makes a telephony call\nsound like it comes from a staffed room.",
+        "properties": {
+          "gain_db": {
+            "default": -15.0,
+            "maximum": 0.0,
+            "minimum": -60.0,
+            "title": "Gain Db",
+            "type": "number"
+          },
+          "track": {
+            "$ref": "#/components/schemas/AmbienceTrack"
+          }
+        },
+        "title": "RealtimeAmbienceConfig",
+        "type": "object"
+      },
+      "RealtimeAudioConfig": {
+        "additionalProperties": false,
+        "description": "The agent's audio pipeline, configured once \u2014 not per run.",
+        "properties": {
+          "ambience": {
+            "$ref": "#/components/schemas/RealtimeAmbienceConfig"
+          },
+          "noise_cancellation": {
+            "default": false,
+            "title": "Noise Cancellation",
+            "type": "boolean"
+          },
+          "output": {
+            "default": true,
+            "title": "Output",
+            "type": "boolean"
+          }
+        },
+        "title": "RealtimeAudioConfig",
+        "type": "object"
+      },
       "RealtimeBotLlmStarted": {
         "description": "Model began generating its turn (first text or audio event arrived).\n\nDistinct from ``bot-started-speaking`` so UI can show \"thinking\u2026\" before\naudio is on the wire \u2014 useful when the model takes a moment to start\ngenerating, or when tool calls precede speech.",
         "properties": {
@@ -186,7 +225,7 @@
       },
       "RealtimeCatalogAgentConfig": {
         "additionalProperties": false,
-        "description": "Run a workspace catalog agent by handle \u2014 the stored config runs\nverbatim. Only per-run ride-alongs may accompany the launch:\n``inputs`` (per-run input values), ``tools`` (client-executed\ndeclarations the server cannot provide), ``speaking_style``\n(client-resolved per-run text), and ``voice`` (cosmetic per-run\noverride). Other stored-config fields (``instructions``, ``model``, \u2026)\nare structurally absent from this variant \u2014 sending one is a schema\nerror (``extra=\"forbid\"``), not a runtime rejection.",
+        "description": "Run a workspace catalog agent by handle \u2014 the stored config runs\nverbatim. Only per-run ride-alongs may accompany the launch:\n``inputs`` (per-run input values), ``tools`` (client-executed\ndeclarations the server cannot provide), and ``voice`` (per-run\nspeaking style plus the one cosmetic override). Other stored-config\nfields (``instructions``, ``model``, \u2026) are structurally absent from\nthis variant \u2014 sending one is a schema error (``extra=\"forbid\"``), not\na runtime rejection.",
         "properties": {
           "inputs": {
             "additionalProperties": {
@@ -201,20 +240,15 @@
             "title": "Name",
             "type": "string"
           },
-          "speaking_style": {
-            "maxLength": 8192,
-            "title": "Speaking Style",
-            "type": "string"
-          },
           "tools": {
             "items": {
               "discriminator": {
                 "mapping": {
                   "catalog": "#/components/schemas/RealtimeCatalogToolSpec",
                   "client": "#/components/schemas/RealtimeClientToolSpec",
-                  "detect": "#/components/schemas/RealtimeDetectToolSpec",
+                  "detect_objects": "#/components/schemas/RealtimeDetectObjectsToolSpec",
                   "examine_image": "#/components/schemas/RealtimeExamineImageToolSpec",
-                  "point": "#/components/schemas/RealtimePointToolSpec",
+                  "point_at_object": "#/components/schemas/RealtimePointAtObjectToolSpec",
                   "screen_interaction": "#/components/schemas/RealtimeScreenInteractionSpec",
                   "server": "#/components/schemas/RealtimeServerToolSpec",
                   "web_search": "#/components/schemas/RealtimeWebSearchToolSpec"
@@ -241,10 +275,10 @@
                   "$ref": "#/components/schemas/RealtimeExamineImageToolSpec"
                 },
                 {
-                  "$ref": "#/components/schemas/RealtimeDetectToolSpec"
+                  "$ref": "#/components/schemas/RealtimeDetectObjectsToolSpec"
                 },
                 {
-                  "$ref": "#/components/schemas/RealtimePointToolSpec"
+                  "$ref": "#/components/schemas/RealtimePointAtObjectToolSpec"
                 }
               ]
             },
@@ -259,9 +293,7 @@
             "type": "string"
           },
           "voice": {
-            "maxLength": 128,
-            "title": "Voice",
-            "type": "string"
+            "$ref": "#/components/schemas/RealtimeVoiceConfig"
           }
         },
         "required": [
@@ -324,6 +356,29 @@
           "type"
         ],
         "title": "RealtimeClientBindInput",
+        "type": "object"
+      },
+      "RealtimeClientContext": {
+        "description": "Add text to the model's context without asking it to reply.\n\nThe content rides the provider's pre-turn channel, so the model is never\nasked for a response and cannot open a turn for it; it reads the note as\nbackground when it next answers the user. This is the opposite of\n``send-text``, which *is* a turn.\n\nFor live application state (scroll position, selection, current record,\nform values) that should inform the agent without interrupting it.",
+        "properties": {
+          "content": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          },
+          "type": {
+            "const": "send-context",
+            "default": "send-context",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content",
+          "type"
+        ],
+        "title": "RealtimeClientContext",
         "type": "object"
       },
       "RealtimeClientEnd": {
@@ -453,9 +508,6 @@
             "title": "Content",
             "type": "string"
           },
-          "options": {
-            "$ref": "#/components/schemas/RealtimeClientTextOptions"
-          },
           "type": {
             "const": "send-text",
             "default": "send-text",
@@ -468,18 +520,6 @@
           "type"
         ],
         "title": "RealtimeClientText",
-        "type": "object"
-      },
-      "RealtimeClientTextOptions": {
-        "description": "Inline options on a text-send.\n\n``audio_response``: when ``False``, the server suppresses TTS output for\nthis turn \u2014 text in, text out. Defaults to ``True`` (full voice loop).",
-        "properties": {
-          "audio_response": {
-            "default": true,
-            "title": "Audio Response",
-            "type": "boolean"
-          }
-        },
-        "title": "RealtimeClientTextOptions",
         "type": "object"
       },
       "RealtimeClientToolSpec": {
@@ -669,13 +709,22 @@
         "title": "RealtimeCosmoUsage",
         "type": "object"
       },
-      "RealtimeDetectToolSpec": {
+      "RealtimeCredentialKind": {
+        "description": "Which of the two realtime credentials the server saw.",
+        "enum": [
+          "api_key",
+          "user_token"
+        ],
+        "title": "RealtimeCredentialKind",
+        "type": "string"
+      },
+      "RealtimeDetectObjectsToolSpec": {
         "additionalProperties": false,
-        "description": "Opt-in to the server-executed object locator, which returns boxes.\n\nLocates a named object in the freshest camera/screen frame and hands the\ncandidates to the model, which picks one and passes it to whichever\nrenderer the client declared. Zero-config; unknown fields are a schema\nerror. A session with no frame gets the tool's own typed answer at call\ntime, so there is no session-start availability gate.",
+        "description": "Opt-in to the server-executed object locator, which returns boxes.\n\nLocates a named object in the freshest camera/screen frame \u2014 one box\nper matching instance \u2014 and hands the candidates to the model, which\npicks one and passes it to whichever renderer the client declared.\nZero-config; unknown fields are a schema error. Availability is checked\nat session start: a deployment that cannot run the tool starts the\nsession without it and reports the drop on ``ready.rejected_tools``.\nA session with no frame gets the tool's own typed answer at call time.",
         "properties": {
           "kind": {
-            "const": "detect",
-            "default": "detect",
+            "const": "detect_objects",
+            "default": "detect_objects",
             "title": "Kind",
             "type": "string"
           }
@@ -683,7 +732,7 @@
         "required": [
           "kind"
         ],
-        "title": "RealtimeDetectToolSpec",
+        "title": "RealtimeDetectObjectsToolSpec",
         "type": "object"
       },
       "RealtimeEndCall": {
@@ -888,25 +937,8 @@
         "additionalProperties": false,
         "description": "Define the agent inline \u2014 the persona/configuration of the model on\nthe other end, independent of any one run. Reused unchanged across\nsessions. Catalog-only fields (``name``, ``inputs``) are structurally\nabsent \u2014 sending one is a schema error (``extra=\"forbid\"``), so a\nmistagged catalog launch fails loudly instead of silently running the\nneutral default agent.",
         "properties": {
-          "ambience_enabled": {
-            "default": false,
-            "title": "Ambience Enabled",
-            "type": "boolean"
-          },
-          "ambience_gain_db": {
-            "default": -15.0,
-            "maximum": 0.0,
-            "minimum": -60.0,
-            "title": "Ambience Gain Db",
-            "type": "number"
-          },
-          "ambience_track": {
-            "$ref": "#/components/schemas/AmbienceTrack"
-          },
-          "audio_output": {
-            "default": true,
-            "title": "Audio Output",
-            "type": "boolean"
+          "audio": {
+            "$ref": "#/components/schemas/RealtimeAudioConfig"
           },
           "greeting": {
             "maxLength": 4000,
@@ -959,25 +991,15 @@
             ],
             "title": "Model Options"
           },
-          "noise_cancellation_enabled": {
-            "default": false,
-            "title": "Noise Cancellation Enabled",
-            "type": "boolean"
-          },
-          "speaking_style": {
-            "maxLength": 8192,
-            "title": "Speaking Style",
-            "type": "string"
-          },
           "tools": {
             "items": {
               "discriminator": {
                 "mapping": {
                   "catalog": "#/components/schemas/RealtimeCatalogToolSpec",
                   "client": "#/components/schemas/RealtimeClientToolSpec",
-                  "detect": "#/components/schemas/RealtimeDetectToolSpec",
+                  "detect_objects": "#/components/schemas/RealtimeDetectObjectsToolSpec",
                   "examine_image": "#/components/schemas/RealtimeExamineImageToolSpec",
-                  "point": "#/components/schemas/RealtimePointToolSpec",
+                  "point_at_object": "#/components/schemas/RealtimePointAtObjectToolSpec",
                   "screen_interaction": "#/components/schemas/RealtimeScreenInteractionSpec",
                   "server": "#/components/schemas/RealtimeServerToolSpec",
                   "web_search": "#/components/schemas/RealtimeWebSearchToolSpec"
@@ -1004,10 +1026,10 @@
                   "$ref": "#/components/schemas/RealtimeExamineImageToolSpec"
                 },
                 {
-                  "$ref": "#/components/schemas/RealtimeDetectToolSpec"
+                  "$ref": "#/components/schemas/RealtimeDetectObjectsToolSpec"
                 },
                 {
-                  "$ref": "#/components/schemas/RealtimePointToolSpec"
+                  "$ref": "#/components/schemas/RealtimePointAtObjectToolSpec"
                 }
               ]
             },
@@ -1022,8 +1044,7 @@
             "type": "string"
           },
           "voice": {
-            "title": "Voice",
-            "type": "string"
+            "$ref": "#/components/schemas/RealtimeVoiceConfig"
           }
         },
         "required": [
@@ -1086,13 +1107,13 @@
         "title": "RealtimePersonaplexModelOptions",
         "type": "object"
       },
-      "RealtimePointToolSpec": {
+      "RealtimePointAtObjectToolSpec": {
         "additionalProperties": false,
-        "description": "Opt-in to the server-executed object locator, which returns points.\n\nThe sibling of ``detect``: a marked point says one thing where a box\naround a leaf includes everything behind it. Same zero-config and\nno-gate terms.",
+        "description": "Opt-in to the server-executed object locator, which returns points.\n\nThe sibling of ``detect_objects``: a marked point says one thing where\na box around a leaf includes everything behind it. Same zero-config and\navailability terms.",
         "properties": {
           "kind": {
-            "const": "point",
-            "default": "point",
+            "const": "point_at_object",
+            "default": "point_at_object",
             "title": "Kind",
             "type": "string"
           }
@@ -1100,7 +1121,7 @@
         "required": [
           "kind"
         ],
-        "title": "RealtimePointToolSpec",
+        "title": "RealtimePointAtObjectToolSpec",
         "type": "object"
       },
       "RealtimePong": {
@@ -1788,7 +1809,7 @@
         "type": "object"
       },
       "RealtimeTranscriptDelta": {
-        "description": "Streaming transcript event for either speaker.\n\nFor the assistant role in audio sessions, this is the audio\ntranscription \u2014 the words the listener actually heard. The model may\nALSO emit a separate text channel via ``RealtimeModelText``; consumers\nthat render a \"what was spoken\" bubble should subscribe to\n``transcript`` only.\n\nContract (wire-level, applies to both user and assistant):\n\n* Streaming events (``is_final=False``): ``text`` is the **new\n  fragment since the previous event** for that role's turn (a\n  delta). Consumers append.\n* Terminating event (``is_final=True``): ``text`` is the\n  **cumulative full transcript** for the turn. Consumers replace\n  whatever they accumulated with this value.",
+        "description": "Streaming transcript event for either speaker.\n\nFor the assistant role in audio sessions, this is the audio\ntranscription \u2014 the words the listener actually heard. The model may\nALSO emit a separate text channel via ``RealtimeModelText``; consumers\nthat render a \"what was spoken\" bubble should subscribe to\n``transcript`` only.\n\nContract (wire-level, applies to both user and assistant):\n\n* Streaming events (``is_final=False``): ``text`` is the **new\n  fragment since the previous event** for that role's turn (a\n  delta). Consumers append.\n* Terminating event (``is_final=True``): ``text`` is the\n  **cumulative full transcript** for the turn. Consumers replace\n  whatever they accumulated with this value.\n\nTwo carve-outs where the terminating event is NOT the full turn, both\nload-bearing rather than accidental:\n\n* **Empty final.** A turn the model produced nothing usable for (a\n  suppressed or garbled turn) finalizes with ``text=\"\"``. It means an\n  empty turn, not \"unchanged\" \u2014 a consumer that skips empty finals\n  leaves the turn's bubble dangling into the next one.\n* **Suffix final on a silent session.** When the agent runs with\n  ``audio.output=False``, a user final that arrives after the VAD\n  endpoint already committed the utterance is stripped of the committed\n  prefix, so it carries only the remainder. Replacing on final would\n  drop the part committed at the endpoint.\n\nA consumer that only ever appends non-finals and replaces on final is\ncorrect for the common path; these two need the extra handling.",
         "properties": {
           "is_final": {
             "title": "Is Final",
@@ -2015,6 +2036,86 @@
           "type"
         ],
         "title": "RealtimeUserStoppedSpeaking",
+        "type": "object"
+      },
+      "RealtimeVerifyResponse": {
+        "description": "Result of a credential preflight \u2014 a 200 means the credential\nauthenticated; the fields say what it can do from here.",
+        "properties": {
+          "can_start_sessions": {
+            "description": "Whether this credential carries the scope a session start needs. False means the credential is valid but under-scoped.",
+            "title": "Can Start Sessions",
+            "type": "boolean"
+          },
+          "credential": {
+            "$ref": "#/components/schemas/RealtimeCredentialKind"
+          },
+          "external_user_id": {
+            "description": "The end user a minted token is bound to; null for an API key.",
+            "title": "External User Id",
+            "type": "string"
+          },
+          "realtime_voice_available": {
+            "description": "Whether this deployment has the default voice stack configured \u2014 LiveKit plus the default provider's key. A floor, not a per-session guarantee: a session that requests an opt-in provider is checked against that provider instead, so a start can still return 503 when this is true.",
+            "title": "Realtime Voice Available",
+            "type": "boolean"
+          },
+          "scopes": {
+            "description": "Scopes granted to this credential, e.g. ``realtime:use``.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "workspace": {
+            "$ref": "#/components/schemas/RealtimeVerifyWorkspace",
+            "description": "The workspace the credential is bound to. Present for an API key, which the workspace's own developer holds; null for a minted token, which is held by an end user."
+          }
+        },
+        "required": [
+          "credential",
+          "scopes",
+          "can_start_sessions",
+          "realtime_voice_available"
+        ],
+        "title": "RealtimeVerifyResponse",
+        "type": "object"
+      },
+      "RealtimeVerifyWorkspace": {
+        "description": "The workspace the credential is bound to.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "slug"
+        ],
+        "title": "RealtimeVerifyWorkspace",
+        "type": "object"
+      },
+      "RealtimeVoiceConfig": {
+        "additionalProperties": false,
+        "description": "How the agent sounds: the prebuilt voice and the per-run speaking\nstyle. One sub-object shared by both agent variants.",
+        "properties": {
+          "name": {
+            "maxLength": 128,
+            "title": "Name",
+            "type": "string"
+          },
+          "speaking_style": {
+            "maxLength": 8192,
+            "title": "Speaking Style",
+            "type": "string"
+          }
+        },
+        "title": "RealtimeVoiceConfig",
         "type": "object"
       },
       "RealtimeWebSearchToolSpec": {
@@ -2427,6 +2528,35 @@
         "x-required-scopes": [
           "realtime:use"
         ],
+        "x-workspace-exempt": true
+      }
+    },
+    "/api/v1/external/realtime/verify": {
+      "get": {
+        "description": "Verify a realtime credential without starting a session.",
+        "operationId": "verify_realtime_credential",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RealtimeVerifyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "External Realtime Verify Endpoint",
+        "tags": [
+          "external-realtime"
+        ],
+        "x-auth-type": "external_api",
         "x-workspace-exempt": true
       }
     },

@@ -13,7 +13,7 @@ public struct DrawPointRequest: Sendable, Equatable {
 }
 
 /// `draw_after_point` — the renderer half of the point-then-mark pair, the
-/// sibling of ``DrawAfterDetectTool``. `cosmo_point` returns candidate
+/// sibling of ``DrawAfterDetectTool``. `cosmo_point_at_object` returns candidate
 /// positions to the model; the model picks one and passes it here.
 ///
 /// It exists next to the box renderer because the two answer different
@@ -30,8 +30,8 @@ public enum DrawAfterPointTool {
     public static var toolDescription: String {
         """
         Mark a single spot on the user's screen — one leaf, one screw, one control — using a \
-        point cosmo_point returned, normalized to the frame you were shown ([0,1], top-left \
-        origin), with an optional short label. Call this after cosmo_point rather than \
+        point cosmo_point_at_object returned, normalized to the frame you were shown ([0,1], top-left \
+        origin), with an optional short label. Call this after cosmo_point_at_object rather than \
         guessing a position yourself. Visual only — it measures nothing and changes nothing.
         """
     }

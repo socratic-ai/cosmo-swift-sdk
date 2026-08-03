@@ -107,4 +107,10 @@ public struct AgentSession: Sendable {
         await session.end()
         if let connected { await connected.aclose() }
     }
+
+    /// Suspend until the underlying session has ended, for any reason. See
+    /// ``RealtimeSession/waitUntilEnded()``.
+    public func waitUntilEnded() async {
+        await session.waitUntilEnded()
+    }
 }

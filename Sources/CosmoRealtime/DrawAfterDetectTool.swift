@@ -30,7 +30,7 @@ public struct DrawBoxRequest: Sendable, Equatable {
 }
 
 /// `draw_after_detect` — the renderer half of the locate-then-draw pair. A
-/// server-side locator (`cosmo_detect`, or an on-device Vision tool) returns
+/// server-side locator (`cosmo_detect_objects`, or an on-device Vision tool) returns
 /// candidate boxes to the model; the model picks the one that matches what it
 /// is looking at and passes it here. Naming it for the call it follows is what
 /// keeps the model from confusing the two halves.
@@ -50,9 +50,9 @@ public enum DrawAfterDetectTool {
 
     public static var toolDescription: String {
         """
-        Draw a box on the user's screen around something cosmo_detect located — pass a box \
+        Draw a box on the user's screen around something cosmo_detect_objects located — pass a box \
         it returned, normalized to the frame you were shown ([0,1], top-left origin), and an \
-        optional short label. Call this after cosmo_detect rather than guessing a box \
+        optional short label. Call this after cosmo_detect_objects rather than guessing a box \
         yourself. Visual only — it measures nothing and changes nothing.
         """
     }

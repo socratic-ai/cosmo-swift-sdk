@@ -14,6 +14,42 @@ public enum ServerEvent: Sendable, Equatable {
     case unknown(type: String, raw: [String: JSONValue])
 }
 
+extension ServerEvent {
+    /// Narrow one ``RealtimeSession/Event`` — what ``RealtimeSession/events``
+    /// yields — to the transcript vocabulary. ``nil`` for events with no
+    /// transcript representation, which callers fold as a no-op.
+    public init?(_ event: RealtimeSession.Event) {
+        switch event {
+        case .ready(let ready):
+            self = .ready(Ready(sessionId: ready.sessionId))
+        case .transcript(let delta):
+            self = .transcript(Transcript(
+                role: delta.role == .user ? .user : .assistant,
+                text: delta.text,
+                isFinal: delta.isFinal
+            ))
+        case .turnComplete(let turn):
+            self = .turnComplete(role: turn.role == .user ? .user : .assistant)
+        case .toolCall(let call):
+            self = .toolCall(ToolCall(callId: call.toolCallId, name: call.name))
+        case .toolResult(let result):
+            self = .toolResult(ToolResult(
+                callId: result.toolCallId, ok: result.ok, summary: result.summary
+            ))
+        case .error(let err):
+            self = .error(ServerError(code: err.code.rawValue, message: err.message))
+        case .pong:
+            self = .pong
+        case .modelText, .userStartedSpeaking, .userStoppedSpeaking,
+             .botStartedSpeaking, .botStoppedSpeaking, .botLlmStarted,
+             .botLlmStopped, .botTtsStarted, .botTtsStopped,
+             .toolDispatchStarted, .toolInvocation, .reconnecting, .cosmo,
+             .userSpeechTimeout, .sessionEnded, .unknown:
+            return nil
+        }
+    }
+}
+
 /// Cumulative token usage for a live session, split by direction and modality.
 /// Decodes from the wire `usage` message; absent fields default to 0. Gemini
 /// Live bills screen-share video frames as image tokens (no separate video).
