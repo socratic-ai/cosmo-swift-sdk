@@ -42,7 +42,7 @@ public struct DrawPathRequest: Sendable, Equatable {
 }
 
 /// `draw_path` — a model-directed UI annotation tool, the freehand sibling of
-/// ``DrawAfterDetectTool``. The model decides, on its own initiative, *when* and
+/// ``DrawBoxTool``. The model decides, on its own initiative, *when* and
 /// *where* to trace a line or outline; the app renders it and acks. Like the box
 /// tool it measures nothing — it carries the model's intent to the client UI. The
 /// SDK owns the contract (declaration + typed decode of the arguments); the app

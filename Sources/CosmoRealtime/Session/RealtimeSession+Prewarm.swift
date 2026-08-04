@@ -105,4 +105,17 @@ extension RealtimeSession {
         AudioCaptureOptions()
         #endif
     }
+
+    #if os(iOS)
+    /// Toggle LiveKit's automatic `AVAudioSession` management. When disabled,
+    /// the host app is the sole owner of the session: LiveKit no longer
+    /// configures the category/mode/route or activates/deactivates it around a
+    /// connect, so the app's own `.playAndRecord`/`.voiceChat` configuration is
+    /// the one in force when the mic's voice-processing (VPIO) echo canceller
+    /// comes up. Set once before the first ``start(_:config:)``. iOS-only —
+    /// macOS has no `AVAudioSession`.
+    public static func setAutomaticAudioSessionManagement(enabled: Bool) {
+        AudioManager.shared.audioSession.isAutomaticConfigurationEnabled = enabled
+    }
+    #endif
 }

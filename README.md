@@ -3,7 +3,7 @@
 Native async/await Swift client for the Cosmo Realtime API.
 
 > **Beta.** CosmoAI is pre-1.0: minor releases (`0.x` → `0.y`) may include
-> breaking API changes, so pin with `.upToNextMinor`. We will cut 1.0 once the
+> breaking API changes, so pin with `.upToNextMinor`. Cosmo cuts 1.0 once the
 > wire protocol and the public session API have stabilized.
 
 > New to the SDK? Start with the [documentation](https://platform.askcosmo.ai/docs)
@@ -20,7 +20,7 @@ Native async/await Swift client for the Cosmo Realtime API.
 dependencies: [
     .package(
         url: "https://github.com/socratic-ai/cosmo-swift-sdk",
-        .upToNextMinor(from: "0.1.0")
+        .upToNextMinor(from: "0.3.0")
     ),
 ],
 targets: [
@@ -37,7 +37,7 @@ targets: [
 
 Or add via Xcode: **File → Add Package Dependencies…**, paste
 `https://github.com/socratic-ai/cosmo-swift-sdk`, and pick
-**Up to Next Minor Version** from `0.1.0`.
+**Up to Next Minor Version**.
 
 ## Quickstart
 
@@ -52,10 +52,7 @@ struct WeatherArgs: Decodable, Sendable {
 }
 
 let session = try await RealtimeSession.start(
-    .init(
-        apiKey: "cosmo_your_api_key",
-        baseURL: URL(string: "https://app.askcosmo.ai")!
-    ),
+    .init(apiKey: "cosmo_your_api_key"),
     config: SessionConfig(
         instructions: "You are a terse assistant.",
         tools: [
@@ -120,7 +117,7 @@ Client-level settings; pass once per `start`.
 | Property | Type | Default |
 |---|---|---|
 | `credential` | `Credential` | required |
-| `baseURL` | `URL` | required |
+| `baseURL` | `URL` | read-only; `COSMO_BASE_URL`, else `https://platform.askcosmo.ai` |
 | `connectTimeout` | `TimeInterval` | `30` |
 | `requestTimeout` | `TimeInterval` | `45` |
 | `verifyTLS` | `VerifyTLS` | `.auto` |
@@ -131,12 +128,25 @@ Client-level settings; pass once per `start`.
 ```swift
 // Workspace-scoped key. Server-side only — it opens sessions AND mints
 // end-user tokens. Never embed it in a distributed app.
-RealtimeSession.Options(apiKey: "cosmo_…", baseURL: baseURL)
+RealtimeSession.Options(apiKey: "cosmo_…")
 
 // A minted per-user JWT, scoped to one external user. Safe to ship in a
 // device or browser: it opens sessions but cannot mint.
-RealtimeSession.Options(token: jwt, baseURL: baseURL)
+RealtimeSession.Options(token: jwt)
 ```
+
+`baseURL` is not an argument. It resolves from `COSMO_BASE_URL` — the same
+variable the Python and TypeScript SDKs read — falling back to
+`https://platform.askcosmo.ai`, and is exposed read-only so you can log which
+backend a session will use. Set it explicitly if your key's workspace does not
+live on `platform.askcosmo.ai`: Cosmo also serves `https://assistant.askcosmo.ai`,
+a separate member-facing surface with its own workspaces, and a key minted on
+one surface fails as a `401` on the other.
+
+An app that picks its backend at launch (a GUI app has no inherited
+environment) publishes the choice with `setenv` before starting a session —
+see `AppModel.publishBackendToEnvironment` in the Cosmo Mac app. One process,
+one backend.
 
 `verifyTLS` defaults to `.auto`, which skips verification only for loopback
 hosts so a self-signed local-dev backend works; remote hosts are always
@@ -157,7 +167,7 @@ the wire and the server applies neutral defaults.
 | `voice` | How the agent sounds: `.init(name:speakingStyle:)` — prebuilt voice id plus delivery guidance |
 | `audio` | The audio pipeline: `.init(output:noiseCancellation:ambience:)` — ambience present = enabled |
 | `instructions` | System instructions |
-| `tools` | Client-executed specs this app fulfils, and typed zero-config server-tool opt-ins (`.webSearch`, `.examineImage`, `.detect`, `.point`) |
+| `tools` | Client-executed specs this app fulfills, and typed zero-config server-tool opt-ins (`.webSearch`, `.examineImage`, `.detectObjects`, `.pointAtObject`) |
 | `interruptionSensitivity` | How readily the user's speech interrupts the agent (`.default` / `.low` / `.high`) |
 | `greeting` | Opening line the assistant speaks first, voiced server-side as soon as the model session opens — before the client even receives `ready` |
 | `resumeSessionId` | Resume a prior session (rides under the experimental knobs) |
@@ -224,7 +234,7 @@ Handlers are local-only — never serialized, never on the wire.
   publishes a best-effort `session-ended` wire frame before a deliberate
   teardown; the SDK latches its reason onto the sentinel rather than
   surfacing the frame mid-stream. Start failures throw from `start(...)`
-  instead (e.g. `RealtimeSessionError.versionMismatch`).
+  instead (for example, `RealtimeSessionError.versionMismatch`).
 
 Oversized server messages arrive chunked (`server-envelope-chunk`) and are
 reassembled transparently before they surface as events.
@@ -265,7 +275,7 @@ That reduction is correct for the common path. Two cases need more:
   remainder, so replacing on it drops the committed prefix.
 
 `TranscriptReducer` folds events into `[TranscriptLine]` for you and handles
-the first case. It does not yet handle the second — a text-only session that
+the first case. It doesn't yet handle the second — a text-only session that
 reduces user transcripts this way loses the committed prefix.
 
 ### Sends
@@ -278,12 +288,12 @@ await session.end()             // graceful: wire end frame, then teardown
 await session.waitUntilEnded()  // returns once the session is over
 ```
 
-Client tools are not sent here — declare a handler on the tool spec and the
+Client tools aren't sent here — declare a handler on the tool spec and the
 SDK runs it over the transport when the agent invokes it.
 
 `waitUntilEnded()` returns once the session has ended for any reason (`end()`,
-a server-side stop, or a transport drop). It is the supported way to keep a
-CLI alive for the length of a call; it does not consume `events`, so you can
+a server-side stop, or a transport drop). It's the supported way to keep a
+CLI alive for the length of a call; it doesn't consume `events`, so you can
 drain the stream from another task and await this one on the main path.
 
 ### Readiness vs liveness
@@ -330,7 +340,7 @@ let session = try await RealtimeSession.start(options, config: config)
 
 `preToolUse` and `postToolUse` take an optional glob matcher on the tool name
 and **throw** — a malformed matcher is rejected there, not at session start.
-`sessionStart` and `sessionEnd` take no matcher and do not throw.
+`sessionStart` and `sessionEnd` take no matcher and don't throw.
 
 A fired server-hook silence timeout (a `Hook.server(SilenceTimeout(...))` entry
 in the same list) reaches you as a `.userSpeechTimeout` event on the session's
@@ -339,15 +349,15 @@ mid-call.
 
 ### Live e2e (`HooksExample`)
 
-`Examples/HelloRealtime/Sources/HooksExample` is a self-contained runnable
+`HelloRealtime/Sources/HooksExample` in the [examples repo](https://github.com/socratic-ai/cosmo-examples/tree/main/swift) is a self-contained runnable
 harness that exercises all four hooks in one headless session: SessionStart
 (inject caller context), PreToolUse/deny (block `delete_account` before it
 runs), PreToolUse/rewrite (force `account=primary` on `get_account_balance`),
 PostToolUse (observe outcome), and SessionEnd (observe exit reason).
 
 ```bash
-cd Examples/HelloRealtime
-COSMO_API_KEY=cosmo_… COSMO_BASE_URL=https://app.askcosmo.ai swift run HooksExample
+git clone https://github.com/socratic-ai/cosmo-examples && cd cosmo-examples/swift/HelloRealtime
+COSMO_API_KEY=cosmo_… swift run HooksExample
 ```
 
 Each `◆ HOOK` line in the output proves the corresponding hook fired. The
@@ -366,7 +376,7 @@ the body as private, never-spoken instructions for the rest of the call.
 let skills = [try parseSkillMd(refundsMarkdown, defaultName: "refunds")]
 let agent = try Agent(skills: skills)
 let session = try await agent.start(
-    RealtimeSession.Options(token: jwt, baseURL: baseURL),
+    RealtimeSession.Options(token: jwt),
     config: SessionConfig(instructions: "You are a terse support agent."))
 // the menu is now resident; the model can call load_skill("refunds")
 await session.end()
@@ -379,7 +389,7 @@ all land in `SessionConfig.tools`. Every attached skill rides resident as
 `SKILL.md` frontmatter keys (`tier`, `allowed-tools`, `license`, …) are
 accepted and ignored, so documents authored for other harnesses stay valid.
 
-`Examples/HelloRealtime/Sources/SkillsExample` is a runnable version.
+`HelloRealtime/Sources/SkillsExample` in the examples repo is a runnable version.
 
 ## MCP servers (local stdio)
 
@@ -393,7 +403,7 @@ client tools.
 let registry = try McpRegistry.fromConfigFile(url)
 let agent = try Agent(mcp: registry)
 let session = try await agent.start(
-    RealtimeSession.Options(token: jwt, baseURL: baseURL))
+    RealtimeSession.Options(token: jwt))
 // drive session.session.events … ; then:
 await session.end()
 ```
@@ -402,7 +412,7 @@ v1 supports **stdio** servers (macOS — subprocess); remote (`url`) entries in
 `.mcp.json` are skipped with a warning. A `StdioServer` runs an arbitrary local
 command — trust your config. No third-party dependency is added.
 
-`Examples/HelloRealtime/Sources/MCPExample` is a runnable version.
+`HelloRealtime/Sources/MCPExample` in the examples repo is a runnable version.
 
 ## Authentication
 
@@ -417,11 +427,11 @@ anything you distribute, mint a per-user token instead and construct with
 `RealtimeSession.Options(token:)`.
 
 `RealtimeClient(options).verify()` checks the credential without starting a
-session — free, no room, no agent. It returns the workspace it is bound to, its
+session — free, no room, no agent. It returns the workspace it's bound to, its
 scopes, whether it carries `realtime:use` (`canStartSessions`), and whether the
 deployment has the default voice stack configured (`realtimeVoiceAvailable`).
 `workspace` is nil
-for a minted token — it runs on an end user's device, which is not told whose
+for a minted token — it runs on an end user's device, which isn't told whose
 workspace it belongs to. Only a credential the server rejects throws
 (`VerifyError`); an under-scoped one comes back as a result.
 
@@ -445,26 +455,26 @@ only ever `import CosmoRealtime`.
 
 ## Example
 
-See [`Examples/HelloRealtime/`](Examples/HelloRealtime/) for a runnable macOS
+See [`HelloRealtime/`](https://github.com/socratic-ai/cosmo-examples/tree/main/swift/HelloRealtime) in the examples repo for a runnable macOS
 command-line program that connects, declares a typed client tool, listens for
 transcripts, sends a text message, and disconnects — no audio required.
 
 ```bash
-cd Examples/HelloRealtime
-COSMO_API_KEY=cosmo_… COSMO_BASE_URL=https://app.askcosmo.ai swift run
+git clone https://github.com/socratic-ai/cosmo-examples && cd cosmo-examples/swift/HelloRealtime
+COSMO_API_KEY=cosmo_… swift run
 ```
 
 `HooksExample`, `SkillsExample`, and `MCPExample` live alongside it as
 `swift run <target>` programs.
 
-[`Examples/Cartographer/`](Examples/Cartographer/) is the GUI counterpart: a
+[`Cartographer/`](https://github.com/socratic-ai/cosmo-examples/tree/main/swift/Cartographer) is the GUI counterpart: a
 SwiftUI macOS app that draws a live mind map from what you say, with client
 tools mutating on-screen state and hooks enforcing an app-side limit. Its
 `bundle.sh` is also the reference for packaging a SwiftPM-built `.app` that can
 actually reach the microphone.
 
 ```bash
-cd Examples/Cartographer
+git clone https://github.com/socratic-ai/cosmo-examples && cd cosmo-examples/swift/Cartographer
 COSMO_API_KEY=cosmo_… ./run.sh --demo
 ```
 

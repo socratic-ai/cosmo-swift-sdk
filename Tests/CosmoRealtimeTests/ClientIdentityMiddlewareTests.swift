@@ -62,7 +62,7 @@ struct APIMiddlewareStackTests {
 
     private func options(identity: ClientIdentity?) -> RealtimeSession.Options {
         RealtimeSession.Options(
-            apiKey: "cosmo_secret", baseURL: URL(string: "https://api.example.com")!,
+            apiKey: "cosmo_secret",
             clientIdentity: identity
         )
     }
@@ -87,7 +87,7 @@ struct APIMiddlewareStackTests {
     @Test("the token convenience init forwards clientIdentity the same as the apiKey init")
     func tokenInitForwardsClientIdentity() {
         let opts = RealtimeSession.Options(
-            token: "jwt-abc", baseURL: URL(string: "https://api.example.com")!,
+            token: "jwt-abc",
             clientIdentity: ClientIdentity(client: "cosmo-mac", marketingVersion: "1.0.0", build: "42")
         )
         #expect(opts._apiMiddlewares(prepared: nil).contains { $0 is ClientIdentityMiddleware })

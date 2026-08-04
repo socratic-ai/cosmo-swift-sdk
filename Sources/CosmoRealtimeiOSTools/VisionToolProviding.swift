@@ -20,8 +20,7 @@ public protocol VisionToolProviding: Sendable {
     /// Must match the backend regex `^[a-z][a-z0-9_]{2,63}$` (`client_declared.py`).
     static var name: String { get }
 
-    /// Model-facing description, 1–3 sentences (see
-    /// `.claude/rules/realtime-tool-descriptions.md`). Failure recovery rides on
+    /// Model-facing description, 1–3 sentences. Failure recovery rides on
     /// the reply's `usable:false`/`reason`, not on prose here.
     static var toolDescription: String { get }
 

@@ -740,7 +740,7 @@ actor LiveKitSessionTransport: SessionTransport {
         }
     }
 
-    /// POST ``/session/start-resolved`` and decode the response. Static
+    /// POST ``/session/start`` and decode the response. Static
     /// (captures only the Sendable ``Client``) so the prepared fast path can
     /// run it in a parallel task while the room join proceeds.
     private static func _callStart(

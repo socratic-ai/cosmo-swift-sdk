@@ -124,6 +124,19 @@ protocol SessionTransport: Sendable {
     /// the share. Returns a ``Cancellable`` to drop the listener.
     nonisolated func onScreenShareFailed(_ handler: @escaping @Sendable (Error) -> Void) -> Cancellable
 
+    // MARK: Video streams
+
+    /// Begin a non-screen video publish (camera, file, any pixels-only
+    /// stream) and return its pushable handle, on the same
+    /// deferred-publish contract as ``startScreenShare``. One video
+    /// publish at a time: throws
+    /// ``RealtimeSessionError/videoPublishAlreadyActive`` while any
+    /// video publish is live.
+    func addVideoStream() async throws -> VideoStreamHandle
+    /// Remove a video stream added by ``addVideoStream``. Identity-keyed
+    /// and idempotent: a stale handle is a no-op.
+    func removeVideoStream(_ handle: VideoStreamHandle) async
+
     // MARK: QoE
 
     /// Per-session WebRTC quality aggregated so far: connect-phase and

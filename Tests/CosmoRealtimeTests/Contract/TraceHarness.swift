@@ -84,6 +84,15 @@ actor FakeSessionTransport: SessionTransport {
         Cancellable {}
     }
 
+    // No contract trace exercises video streams either.
+    private(set) var videoStreamActive = false
+
+    func addVideoStream() async throws -> VideoStreamHandle {
+        videoStreamActive = true
+        return VideoStreamHandle(streamID: UUID()) { _ in }
+    }
+    func removeVideoStream(_ handle: VideoStreamHandle) async { videoStreamActive = false }
+
     // No contract trace exercises QoE; an all-nil snapshot satisfies the
     // protocol and keeps the suite compiling.
     nonisolated var qoeSnapshot: SessionQoESnapshot {
@@ -217,6 +226,7 @@ func thrownName(_ error: RealtimeSessionError) -> String {
     case .transportError: return "transportError"
     case .invalidPayload: return "invalidPayload"
     case .screenShareUnavailable: return "screenShareUnavailable"
+    case .videoPublishAlreadyActive: return "videoPublishAlreadyActive"
     case .insecureBaseURL: return "insecureBaseURL"
     }
 }
@@ -229,7 +239,8 @@ func thrownDetail(_ error: RealtimeSessionError) -> String? {
     case .transportError(let message): return message
     case .invalidPayload(let detail): return detail
     case .insecureBaseURL(let url): return url
-    case .voiceDisabled, .alreadyStarted, .notConnected, .screenShareUnavailable: return nil
+    case .voiceDisabled, .alreadyStarted, .notConnected, .screenShareUnavailable,
+         .videoPublishAlreadyActive: return nil
     }
 }
 

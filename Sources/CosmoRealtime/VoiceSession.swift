@@ -63,6 +63,7 @@ public actor VoiceSession {
         credentials: Credentials,
         tools: [String]? = nil,
         declaredTools: [DeclaredClientTool]? = nil,
+        clientTools: [SessionConfig.Tool] = [],
         backgroundClientToolHandlers: [String: BackgroundClientToolHandler]? = nil,
         voiceName: String? = nil,
         resumeFromCallId: String? = nil,
@@ -79,13 +80,13 @@ public actor VoiceSession {
         micMuted: Bool = false,
         clientToolMethods: [String] = [],
         clientToolHandler: (@Sendable (String, String) async -> String)? = nil,
-        screenInteraction: ScreenInteraction? = nil,
         options: ClientOptions = .init()
     ) async throws -> VoiceSession {
         let session = VoiceSession(credentials: credentials, options: options)
         try await session._connect(
             tools: tools,
             declaredTools: declaredTools,
+            clientTools: clientTools,
             backgroundClientToolHandlers: backgroundClientToolHandlers,
             voiceName: voiceName,
             resumeFromCallId: resumeFromCallId,
@@ -101,8 +102,7 @@ public actor VoiceSession {
             dictation: dictation,
             micMuted: micMuted,
             clientToolMethods: clientToolMethods,
-            clientToolHandler: clientToolHandler,
-            screenInteraction: screenInteraction
+            clientToolHandler: clientToolHandler
         )
         return session
     }
@@ -266,6 +266,20 @@ public actor VoiceSession {
         sessionBox.withLock { $0 }?.onScreenShareFailed(handler) ?? Cancellable {}
     }
 
+    /// Publish a non-screen video stream (camera, file, any pixels-only
+    /// stream); the returned handle is the frame sink for captured
+    /// ``CMSampleBuffer``s. See ``RealtimeSession/addVideoStream()``.
+    public func addVideoStream() async throws -> VideoStreamHandle {
+        try await requireSession().addVideoStream()
+    }
+
+    /// Remove a video stream added by ``addVideoStream()``. Idempotent;
+    /// pushes into a removed handle are safely inert.
+    public func removeVideoStream(_ handle: VideoStreamHandle) async {
+        guard let session = sessionBox.withLock({ $0 }) else { return }
+        await session.removeVideoStream(handle)
+    }
+
     // MARK: - Connect + teardown
 
     private func requireSession() throws -> RealtimeSession {
@@ -278,6 +292,7 @@ public actor VoiceSession {
     private func _connect(
         tools: [String]?,
         declaredTools: [DeclaredClientTool]?,
+        clientTools: [SessionConfig.Tool],
         backgroundClientToolHandlers: [String: BackgroundClientToolHandler]?,
         voiceName: String?,
         resumeFromCallId: String?,
@@ -293,8 +308,7 @@ public actor VoiceSession {
         dictation: Bool,
         micMuted: Bool,
         clientToolMethods: [String],
-        clientToolHandler: (@Sendable (String, String) async -> String)?,
-        screenInteraction: ScreenInteraction?
+        clientToolHandler: (@Sendable (String, String) async -> String)?
     ) async throws {
         connectionStateContinuation.yield(.connecting)
 
@@ -316,6 +330,7 @@ public actor VoiceSession {
         // the external boundary.
         let config = try Self.makeConfig(
             declaredTools: declaredTools,
+            clientTools: clientTools,
             backgroundClientToolHandlers: backgroundClientToolHandlers,
             voiceName: voiceName,
             resumeFromCallId: resumeFromCallId,
@@ -328,25 +343,15 @@ public actor VoiceSession {
             systemPrompt: systemPrompt,
             speakingStyle: speakingStyle,
             agentName: agentName,
-            dictation: dictation,
-            screenInteractionEnabled: screenInteraction != nil
+            dictation: dictation
         )
         if config.greeting != nil {
             Self.log.notice("voice.client.connect_greeting in session-config")
         }
-        var rpcHandlers = Self.makeRpcHandlers(
+        let rpcHandlers = Self.makeRpcHandlers(
             methods: clientToolMethods,
             handler: clientToolHandler
         )
-        // Register-without-advertise the three screen-interaction RPCs when the
-        // host injected a conformer (the app decides inclusion at session start).
-        // The bridge's byte-stream publish is bound after `start` returns.
-        let screenInteractionBridge: ScreenInteractionBridge? = screenInteraction.map {
-            ScreenInteractionBridge(conformer: $0)
-        }
-        if let screenInteractionBridge {
-            rpcHandlers.merge(screenInteractionBridge.handlers()) { _, screenInteraction in screenInteraction }
-        }
 
         let session: RealtimeSession
         let startedAt = Date()
@@ -365,15 +370,6 @@ public actor VoiceSession {
             throw Self.typedError(for: closeReason, underlying: error)
         }
         sessionBox.withLock { $0 = session }
-        // Bind the capture byte-stream publish to the live session. Weak so the
-        // session's registered RPC handlers (which retain the bridge) don't
-        // retain the session back into a cycle.
-        screenInteractionBridge?.bindSendBytes { [weak session] data, topic in
-            guard let session else {
-                throw ScreenInteractionError(message: "screen_interaction_capture: session ended before publish")
-            }
-            try await session.send(bytes: data, topic: topic)
-        }
         let sessionId = await session.sessionId ?? ""
         currentSessionId = sessionId
         let elapsedMs = Int((Date().timeIntervalSince(startedAt) * 1000).rounded())
@@ -589,7 +585,6 @@ public actor VoiceSession {
     ) -> RealtimeSession.Options {
         RealtimeSession.Options(
             apiKey: credentials.apiKey,
-            baseURL: credentials.apiURL,
             connectTimeout: clientOptions.openTimeout,
             clientIdentity: clientOptions.clientIdentity
         )
@@ -620,6 +615,7 @@ public actor VoiceSession {
 
     static func makeConfig(
         declaredTools: [DeclaredClientTool]?,
+        clientTools: [SessionConfig.Tool] = [],
         backgroundClientToolHandlers: [String: BackgroundClientToolHandler]?,
         voiceName: String?,
         resumeFromCallId: String?,
@@ -632,8 +628,7 @@ public actor VoiceSession {
         systemPrompt: String?,
         speakingStyle: String?,
         agentName: String?,
-        dictation: Bool,
-        screenInteractionEnabled: Bool
+        dictation: Bool
     ) throws -> SessionConfig {
         let sensitivity = interruptionSensitivity.flatMap {
             SessionConfig.InterruptionSensitivity(rawValue: $0)
@@ -649,6 +644,10 @@ public actor VoiceSession {
         // ``providerPreference`` reshapes onto ``model``: the external boundary
         // maps ``agent.model`` back to the internal ``upstream_preference``.
         var toolSpecs = try makeTools(declared: declaredTools, background: backgroundClientToolHandlers) ?? []
+        // Tools that carry their own handler — the SDK-shipped ones a caller
+        // wires with a closure. Unlike ``declaredTools`` these need no RPC
+        // registration: ``RealtimeSession`` reads the handler off the spec.
+        toolSpecs.append(contentsOf: clientTools)
         // Typed server-tool opt-ins ride every session — the app always
         // wants them (e.g. screen share can begin mid-session). The old
         // generic ``cosmo.*`` name references are legacy-endpoint
@@ -657,8 +656,8 @@ public actor VoiceSession {
         // policy now.
         toolSpecs.append(.webSearch)
         toolSpecs.append(.examineImage)
-        // The locators behind the app's draw_after_detect / draw_after_point
-        // renderers — requested here so pointing needs no particular agent.
+        // The locators behind the app's cosmo_sdk_draw_* renderers — requested
+        // here so pointing needs no particular agent.
         toolSpecs.append(.detectObjects)
         toolSpecs.append(.pointAtObject)
         // Dictation is not a wire concept: it composes from the generic
@@ -684,7 +683,7 @@ public actor VoiceSession {
             if name == nil && speakingStyle == nil { return nil }
             return .init(name: name, speakingStyle: speakingStyle)
         }()
-        var config = SessionConfig(
+        return SessionConfig(
             agentName: agentName,
             model: inline ? providerPreference : nil,
             modelOptions: inline ? thinking.map { .gemini(thinkingLevel: $0) } : nil,
@@ -697,12 +696,6 @@ public actor VoiceSession {
             resumeSessionId: resumeFromCallId,
             storeRecording: storeRecording
         )
-        // The capability is never an authorable tool: the SDK declares it
-        // mechanically iff the host supplied a screen-interaction
-        // implementation (whose RPC handlers it registers alongside).
-        // Dictation strips it with the rest of the tool surface.
-        config.declaresScreenInteraction = screenInteractionEnabled && !dictation
-        return config
     }
 
     /// The client tools **advertised** to the agent — one spec per
@@ -817,7 +810,8 @@ public actor VoiceSession {
             return .handshakeFailed(status: status)
         case .versionMismatch, .sessionStartFailed, .transportError,
              .alreadyStarted, .notConnected, .invalidPayload,
-             .screenShareUnavailable, .insecureBaseURL:
+             .screenShareUnavailable, .videoPublishAlreadyActive,
+             .insecureBaseURL:
             return nil
         }
     }

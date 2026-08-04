@@ -141,12 +141,12 @@ public final class VoiceSessionModel {
     /// (including reconnects) so client tools work on the worker-pool path.
     public var clientTool: (methods: [String], handler: @Sendable (String, String) async -> String)?
 
-    /// Screen-interaction capability: the conformer this client provides for the
-    /// server-orchestrated screen-control RPCs (`capture`/`activate`/`highlight`).
-    /// Set by the host app before ``start``/``arm`` when the session should be
-    /// able to see and act on the screen; nil means the RPCs are never
-    /// registered. Forwarded into every ``VoiceSession`` at connect.
-    public var screenInteraction: ScreenInteraction?
+    /// Client tools that carry their own handler — the SDK-shipped ones a host
+    /// wires with a closure (``SessionConfig/Tool/drawBox(onDraw:)`` and
+    /// friends). Unlike ``clientTool`` these need no method roster and no
+    /// name routing: the handler rides on the spec. Set before ``start``;
+    /// forwarded into every ``VoiceSession``, reconnects included.
+    public var clientTools: [SessionConfig.Tool] = []
 
     /// Background (deferred) client-tool handlers keyed by tool name. A declared
     /// tool named here executes on the ack-now/deliver-later path — the handler
@@ -385,6 +385,7 @@ public final class VoiceSessionModel {
                     credentials: credentials,
                     tools: tools,
                     declaredTools: declaredTools,
+                    clientTools: clientTools,
                     backgroundClientToolHandlers: backgroundClientTools,
                     voiceName: voiceName,
                     resumeFromCallId: resumeFromCallId,
@@ -403,7 +404,6 @@ public final class VoiceSessionModel {
                     micMuted: micMuted,
                     clientToolMethods: clientTool?.methods ?? [],
                     clientToolHandler: clientTool?.handler,
-                    screenInteraction: screenInteraction,
                     options: options
                 )
                 // Ended or restarted while the transport was connecting. The room
@@ -987,7 +987,16 @@ public final class VoiceSessionModel {
             case .clientEnded, .clientClosed:
                 appendTranscript(kind: .system, text: "Session ended.")
                 transition(to: .idle)
-            case .pingTimeout, .voiceDisabled, .serverClosed, .transportError, .agentNotReady, .decodeError, .handshakeFailed:
+            case .pingTimeout:
+                // A session that's gone quiet (the Mac slept, a network blip,
+                // idle for a while) isn't a failure to report — it's a stale
+                // connection ending the same as a deliberate one, not
+                // something the user did anything wrong to cause or can act
+                // on. Treated like `.clientEnded`/`.clientClosed`: a plain
+                // transcript note and back to idle, no error toast or chime.
+                appendTranscript(kind: .system, text: "Session timed out.")
+                transition(to: .idle)
+            case .voiceDisabled, .serverClosed, .transportError, .agentNotReady, .decodeError, .handshakeFailed:
                 let pres = ErrorPresentationMapper.presentation(reason, heardTranscript: lastUserTranscript())
                 appendTranscript(kind: .error, text: "\(pres.headline) — \(pres.message)")
                 transition(to: .error(pres))

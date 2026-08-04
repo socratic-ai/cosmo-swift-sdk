@@ -45,3 +45,27 @@ extension RealtimeSession {
         transport.onScreenShareFailed(handler)
     }
 }
+
+// MARK: - Video streams
+extension RealtimeSession {
+
+    /// Publish a non-screen video stream (camera, file, any pixels-only
+    /// stream) and return its pushable handle — the frame sink the
+    /// caller feeds captured ``CMSampleBuffer``s into. The publish is
+    /// deferred until the first pushed frame, same as
+    /// ``startScreenShare()``. One video publish at a time: throws
+    /// ``RealtimeSessionError/videoPublishAlreadyActive`` while another
+    /// video publish (stream or share) is live, and
+    /// ``RealtimeSessionError/notConnected`` outside a live session.
+    /// Publish failures surface on ``onScreenShareFailed(_:)``.
+    public func addVideoStream() async throws -> VideoStreamHandle {
+        try await transport.addVideoStream()
+    }
+
+    /// Remove a video stream added by ``addVideoStream()``. Identity-keyed
+    /// and idempotent: a stale handle is a no-op, and pushes into a
+    /// removed handle are safely inert.
+    public func removeVideoStream(_ handle: VideoStreamHandle) async {
+        await transport.removeVideoStream(handle)
+    }
+}

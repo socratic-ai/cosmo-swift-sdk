@@ -15,7 +15,9 @@ struct PrepareRoomRequestTests {
         base: String = "https://api.example.com",
         clientIdentity: ClientIdentity? = nil
     ) -> RealtimeSession.Options {
-        RealtimeSession.Options(apiKey: key, baseURL: URL(string: base)!, clientIdentity: clientIdentity)
+        var options = RealtimeSession.Options(apiKey: key, clientIdentity: clientIdentity)
+        options.baseURL = URL(string: base)!
+        return options
     }
 
     @Test("POSTs to the first-party prepare-room path with bearer auth + JSON content-type")

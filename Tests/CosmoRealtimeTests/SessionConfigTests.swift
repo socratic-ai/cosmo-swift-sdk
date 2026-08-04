@@ -250,8 +250,7 @@ struct SessionConfigTests {
             systemPrompt: "Transcribe only.",
             speakingStyle: nil,
             agentName: nil,
-            dictation: true,
-            screenInteractionEnabled: false
+            dictation: true
         )
         #expect(config.audio?.output == false)
         #expect(config.tools == nil, "dictation must strip every tool")
@@ -273,8 +272,7 @@ struct SessionConfigTests {
             systemPrompt: nil,
             speakingStyle: nil,
             agentName: nil,
-            dictation: false,
-            screenInteractionEnabled: false
+            dictation: false
         )
         #expect(config.audio == nil)
     }
@@ -296,8 +294,7 @@ struct SessionConfigTests {
                 userDisplayName: "Utkarsh Ranjan", dictation: false
             ),
             agentName: agentName,
-            dictation: false,
-            screenInteractionEnabled: false
+            dictation: false
         )
     }
 
@@ -348,11 +345,13 @@ struct SessionConfigTests {
 extension SessionConfigTests {
     @Test("typed server opt-ins serialize as bare kinds")
     func typedServerOptInsSerializeAsKinds() throws {
-        var config = SessionConfig(
+        let config = SessionConfig(
             instructions: "Be helpful.",
-            tools: [.webSearch, .examineImage, .detectObjects, .pointAtObject]
+            tools: [
+                .webSearch, .examineImage, .detectObjects, .pointAtObject,
+                .screenLocate { ScreenFixtures.capture() },
+            ]
         )
-        config.declaresScreenInteraction = true
         let fields = try encodedFields(config)
         guard let agent = object(fields, "agent"),
             case .array(let tools)? = agent["tools"]
@@ -376,13 +375,15 @@ extension SessionConfigTests {
                 .string("examine_image"),
                 .string("detect_objects"),
                 .string("point_at_object"),
-                .string("screen_interaction"),
+                // The capture slot is never advertised as a client tool; what
+                // crosses the wire is the locator it asks the server to run.
+                .string("screen_locate"),
             ]
         )
     }
 
-    @Test("the capability is not declared without a conformer, and dictation strips it")
-    func capabilityFollowsTheConformer() throws {
+    @Test("the locator is not declared without a capture slot, and dictation strips it")
+    func locatorFollowsTheCaptureSlot() throws {
         let bare = try VoiceSession.makeConfig(
             declaredTools: nil,
             backgroundClientToolHandlers: nil,
@@ -397,17 +398,18 @@ extension SessionConfigTests {
             systemPrompt: nil,
             speakingStyle: nil,
             agentName: nil,
-            dictation: false,
-            screenInteractionEnabled: true
+            dictation: false
         )
-        #expect(bare.declaresScreenInteraction)
         // The locator pair rides every session too — pointing must not depend
         // on an agent carrying them in builtin_tool_names. Asserted as an exact
-        // list so a cutover that rewrites this block can't drop them silently.
+        // list so a cutover that rewrites this block can't drop them silently,
+        // and so a screen slot nobody wired can't creep in.
         #expect(bare.tools == [.webSearch, .examineImage, .detectObjects, .pointAtObject])
+        #expect(bare.rpcOnlyHandlers().isEmpty)
 
         let dictation = try VoiceSession.makeConfig(
             declaredTools: nil,
+            clientTools: [.screenLocate { ScreenFixtures.capture() }],
             backgroundClientToolHandlers: nil,
             voiceName: nil,
             resumeFromCallId: nil,
@@ -420,10 +422,30 @@ extension SessionConfigTests {
             systemPrompt: nil,
             speakingStyle: nil,
             agentName: nil,
-            dictation: true,
-            screenInteractionEnabled: true
+            dictation: true
         )
-        #expect(dictation.declaresScreenInteraction == false)
-        #expect(dictation.tools == nil)
+        #expect(dictation.tools == nil, "dictation strips the capture slot with every other tool")
+        #expect(dictation.rpcOnlyHandlers().isEmpty)
+
+        let sharing = try VoiceSession.makeConfig(
+            declaredTools: nil,
+            clientTools: [.screenLocate { ScreenFixtures.capture() }],
+            backgroundClientToolHandlers: nil,
+            voiceName: nil,
+            resumeFromCallId: nil,
+            providerPreference: nil,
+            noiseCancellationEnabled: nil,
+            storeRecording: false,
+            interruptionSensitivity: nil,
+            thinkingLevel: nil,
+            connectGreeting: nil,
+            systemPrompt: nil,
+            speakingStyle: nil,
+            agentName: nil,
+            dictation: false
+        )
+        // Registered by RPC method, never by tool name: the model cannot call it.
+        #expect(Array(sharing.rpcOnlyHandlers().keys) == [ScreenLocateTool.rpcMethod])
+        #expect(sharing.clientToolHandlers().isEmpty)
     }
 }

@@ -18,8 +18,7 @@ struct SessionScreenShareE2ETests {
     private func makeTransport() -> LiveKitSessionTransport {
         LiveKitSessionTransport(
             options: RealtimeSession.Options(
-                apiKey: "n/a",
-                baseURL: URL(string: "https://example.invalid")!
+                apiKey: "n/a"
             )
         )
     }

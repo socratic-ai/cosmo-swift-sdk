@@ -8,8 +8,16 @@ struct ClientToolSchemaDialectTests {
     func uiToolSchemasAreLegal() {
         // A schema with a disallowed key is rejected at the backend and the tool
         // is silently dropped — it must never reach the model. Pin each one.
-        #expect(ClientToolSchemaDialect.firstViolation(inSchemaJSON: DrawAfterDetectTool.parametersJSON) == nil)
+        #expect(ClientToolSchemaDialect.firstViolation(inSchemaJSON: DrawBoxTool.parametersJSON) == nil)
+        #expect(ClientToolSchemaDialect.firstViolation(inSchemaJSON: DrawPointTool.parametersJSON) == nil)
         #expect(ClientToolSchemaDialect.firstViolation(inSchemaJSON: DrawPathTool.parametersJSON) == nil)
+        #expect(ClientToolSchemaDialect.firstViolation(inSchemaJSON: ScreenClickTool.parametersJSON) == nil)
+        #expect(
+            ClientToolSchemaDialect.firstViolation(inSchemaJSON: ScreenHighlightTool.parametersJSON)
+                == nil)
+        #expect(
+            ClientToolSchemaDialect.firstViolation(inSchemaJSON: HighlightRegionTool.parametersJSON)
+                == nil)
     }
 
     @Test("the validator rejects an array-bound key the backend doesn't allow")

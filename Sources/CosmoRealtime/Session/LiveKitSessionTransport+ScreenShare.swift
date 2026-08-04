@@ -26,18 +26,65 @@ extension LiveKitSessionTransport {
         guard room != nil else {
             throw RealtimeSessionError.notConnected
         }
-        if screenShareLock.withLock({ $0 }) != nil {
+        if let current = screenShareLock.withLock({ $0 }) {
+            // Replacing a prior share is the documented idempotence; a live
+            // video stream is someone else's publish — refuse rather than
+            // silently tearing it down.
+            guard current.source == .screenShareVideo else {
+                throw RealtimeSessionError.videoPublishAlreadyActive
+            }
             await stopScreenShare()
         }
+        try createVideoPublishState(
+            name: Track.screenShareVideoName, source: .screenShareVideo
+        )
+    }
+
+    /// Begin a non-screen video publish (camera, file, any pixels-only
+    /// stream) and return its pushable handle. The track is published
+    /// under LiveKit's camera source — the transport encoding of "not
+    /// the user's screen" — with the same deferred-publish contract as
+    /// ``startScreenShare``. One video publish at a time: throws
+    /// ``RealtimeSessionError/videoPublishAlreadyActive`` while any
+    /// video publish (stream or share) is live.
+    func addVideoStream() async throws -> VideoStreamHandle {
+        guard room != nil else {
+            throw RealtimeSessionError.notConnected
+        }
+        guard screenShareLock.withLock({ $0 }) == nil else {
+            throw RealtimeSessionError.videoPublishAlreadyActive
+        }
+        let state = try createVideoPublishState(
+            name: Track.cameraName, source: .camera
+        )
+        let streamID = state.streamID
+        return VideoStreamHandle(streamID: streamID) { [weak self] sampleBuffer in
+            self?.pushVideoFrame(sampleBuffer, matching: streamID)
+        }
+    }
+
+    /// Remove a video stream added by ``addVideoStream``. Identity-keyed
+    /// and idempotent: a stale handle (already removed, or superseded by
+    /// a later publish) is a no-op.
+    func removeVideoStream(_ handle: VideoStreamHandle) async {
+        await stopVideoPublish { $0.streamID == handle.streamID }
+    }
+
+    @discardableResult
+    private func createVideoPublishState(
+        name: String, source: Track.Source
+    ) throws -> ScreenShareState {
         let track = LocalVideoTrack.createBufferTrack(
-            name: Track.screenShareVideoName,
-            source: .screenShareVideo,
+            name: name,
+            source: source,
             options: BufferCaptureOptions()
         )
         guard let capturer = track.capturer as? BufferCapturer else {
             throw RealtimeSessionError.screenShareUnavailable
         }
-        screenShareLock.withLock { $0 = ScreenShareState(track: track, capturer: capturer) }
+        let state = ScreenShareState(track: track, capturer: capturer, source: source)
+        screenShareLock.withLock { $0 = state }
+        return state
     }
 
     /// Push one captured frame into the active screen-share publish.
@@ -46,8 +93,23 @@ extension LiveKitSessionTransport {
     /// to the already-publishing track. No-op if ``startScreenShare``
     /// has not been called or after ``stopScreenShare``.
     nonisolated func pushScreenShareFrame(_ sampleBuffer: CMSampleBuffer) {
+        pushVideoFrame(sampleBuffer, matching: nil)
+    }
+
+    /// Shared push path for both publish families. ``streamID`` scopes a
+    /// video-stream handle's frames to the publish it was minted for, so
+    /// a stale handle goes inert instead of feeding a newer track.
+    private nonisolated func pushVideoFrame(
+        _ sampleBuffer: CMSampleBuffer, matching streamID: UUID?
+    ) {
         guard let state = screenShareLock.withLock({ $0 }) else { return }
-        let processor = screenShareFrameProcessorLock.withLock { $0 }
+        if let streamID, state.streamID != streamID { return }
+        // Frame processors are a screen concept (the Mac composites cursor
+        // and click overlays into outgoing screen frames); camera-class
+        // frames pass through untouched.
+        let processor = state.source == .screenShareVideo
+            ? screenShareFrameProcessorLock.withLock { $0 }
+            : nil
         let outgoing = processor?(sampleBuffer) ?? sampleBuffer
         state.capturer.capture(outgoing)
         _ = screenShareLock.withLock { current -> Bool in
@@ -116,10 +178,17 @@ extension LiveKitSessionTransport {
     }
 
     /// Stop the active screen-share publish. Idempotent; no-op if there
-    /// is no active publish.
+    /// is no active publish. Scoped to screen-source state — a live
+    /// video stream is removed via its own handle, never from here.
     func stopScreenShare() async {
+        await stopVideoPublish { $0.source == .screenShareVideo }
+    }
+
+    private func stopVideoPublish(
+        where shouldStop: (ScreenShareState) -> Bool
+    ) async {
         let state = screenShareLock.withLock { current -> ScreenShareState? in
-            let s = current
+            guard let s = current, shouldStop(s) else { return nil }
             current = nil
             return s
         }

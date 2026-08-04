@@ -11,7 +11,7 @@ struct VoiceSessionOptionsTests {
 
     private let credentials = Credentials(
         apiKey: "cosmo_secret",
-        apiURL: URL(string: "https://app.askcosmo.ai")!
+        apiURL: URL(string: "https://platform.askcosmo.ai")!
     )
 
     private let identity = ClientIdentity(

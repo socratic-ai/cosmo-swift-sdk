@@ -111,7 +111,7 @@ struct MintTokenTests {
             (HTTPResponse(status: .ok), HTTPBody(body))
         }
         let options = RealtimeSession.Options(
-            apiKey: "sk-test", baseURL: URL(string: "https://app.askcosmo.ai")!,
+            apiKey: "sk-test",
             clientIdentity: ClientIdentity(client: "cosmo-mac", marketingVersion: "1.0.0", build: "42")
         )
         _ = try await makeStubClient(transport, options: options).mintToken(externalUserId: "user-42")

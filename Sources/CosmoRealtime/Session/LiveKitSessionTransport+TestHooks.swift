@@ -31,6 +31,14 @@ extension LiveKitSessionTransport {
         screenShareLock.withLock { $0 != nil }
     }
 
+    /// Install an unconnected ``Room`` so the start-path ``room != nil``
+    /// guard passes offline. Track creation runs without a server; the
+    /// deferred publish only fires on the first pushed frame, which these
+    /// tests never send.
+    func _testInstallDetachedRoom() {
+        room = Room(roomOptions: RoomOptions())
+    }
+
     /// The state currently held by ``screenShareLock`` (for identity
     /// comparison in the stop+restart guard test).
     func _testCurrentScreenShareState() -> ScreenShareState? {

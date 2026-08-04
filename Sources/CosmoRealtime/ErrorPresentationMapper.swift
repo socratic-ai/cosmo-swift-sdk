@@ -2,11 +2,11 @@ import Foundation
 
 /// Translates raw SDK errors into UI-ready ``AppErrorPresentation``s.
 ///
-/// Lives in `RealtimeCore` (not the SDK) because the chosen copy /
-/// `Action`s reflect product decisions, not SDK behavior. macOS and a
-/// future iOS app share the same mapping so error UX stays consistent.
+/// The chosen copy / `Action`s reflect product decisions, not SDK behavior.
+/// macOS and a future iOS app share the same mapping so error UX stays
+/// consistent.
 public enum ErrorPresentationMapper {
-    public static let voiceDocsURL = URL(string: "https://docs.askcosmo.ai/voice")!
+    public static let voiceDocsURL = URL(string: "https://assistant.askcosmo.ai/docs")!
 
     public static func presentation(
         _ err: VoiceClientError,
@@ -50,9 +50,9 @@ public enum ErrorPresentationMapper {
         case .transport(let underlying):
             return AppErrorPresentation(
                 headline: "Couldn't connect",
-                message: underlying.localizedDescription,
+                message: transportMessage(for: underlying),
                 heardTranscript: heardTranscript,
-                actions: [.retry],
+                actions: [.retry, .revealLogs],
                 kind: .transport
             )
         case .decode:
@@ -130,9 +130,9 @@ public enum ErrorPresentationMapper {
         case .transportError(let m):
             return AppErrorPresentation(
                 headline: "Couldn't connect",
-                message: m,
+                message: transportMessage(forRawDescription: m),
                 heardTranscript: heardTranscript,
-                actions: [.retry],
+                actions: [.retry, .revealLogs],
                 kind: .transport
             )
         case .agentNotReady:
@@ -226,5 +226,53 @@ public enum ErrorPresentationMapper {
                 kind: .auth
             )
         }
+    }
+
+    /// Generic copy for a transport-layer connect failure whose underlying
+    /// cause can't be narrowed further.
+    private static let genericTransportMessage =
+        "Couldn't reach the server. Check your connection and try again."
+
+    /// Shared with both ``transportMessage(for:)`` and
+    /// ``transportMessage(forRawDescription:)`` so the two entry points can't
+    /// drift to different copy for the same cause.
+    private static let offlineTransportMessage =
+        "You appear to be offline. Check your connection and try again."
+    private static let timedOutTransportMessage =
+        "The connection timed out. Check your network and try again."
+
+    /// Friendly copy for ``VoiceClientError/transport(underlying:)`` —
+    /// `underlying` is whatever LiveKit/URLSession error surfaced (SFU
+    /// unreachable, DNS failure, timeout, ICE failure, ...); its own
+    /// `localizedDescription` is a raw diagnostic dump (domain/code/nested-error
+    /// chain), not something to show the user. The detail isn't lost: the SDK
+    /// logs the full error before this mapping ever runs (see
+    /// `VoiceSessionModel`'s `start failed` log line).
+    private static func transportMessage(for underlying: Error) -> String {
+        guard let urlError = underlying as? URLError else { return genericTransportMessage }
+        switch urlError.code {
+        case .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed:
+            return offlineTransportMessage
+        case .timedOut:
+            return timedOutTransportMessage
+        default:
+            return genericTransportMessage
+        }
+    }
+
+    /// Friendly copy for ``ConnectionCloseReason/transportError(message:)`` —
+    /// by this point the underlying error is already stringified (several
+    /// call sites construct it from `error.localizedDescription`), so there's
+    /// no typed error left to switch on; a best-effort keyword match on the
+    /// common cases beats showing the raw dump.
+    private static func transportMessage(forRawDescription raw: String) -> String {
+        let lowered = raw.lowercased()
+        if lowered.contains("offline") || lowered.contains("not connected to the internet") {
+            return offlineTransportMessage
+        }
+        if lowered.contains("timed out") {
+            return timedOutTransportMessage
+        }
+        return genericTransportMessage
     }
 }

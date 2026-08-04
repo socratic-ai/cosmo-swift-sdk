@@ -17,8 +17,8 @@ public struct NormalizedBox: Sendable, Equatable {
     }
 }
 
-/// One model request to draw a box on the user's screen: where, and an optional
-/// short caption. Decoded from a `draw_after_detect` invocation's arguments.
+/// One model request to draw a box over the user's live view: where, and an optional
+/// short caption. Decoded from a `cosmo_sdk_draw_box` invocation's arguments.
 public struct DrawBoxRequest: Sendable, Equatable {
     public var box: NormalizedBox
     public var label: String?
@@ -29,7 +29,7 @@ public struct DrawBoxRequest: Sendable, Equatable {
     }
 }
 
-/// `draw_after_detect` — the renderer half of the locate-then-draw pair. A
+/// `cosmo_sdk_draw_box` — the renderer half of the locate-then-draw pair. A
 /// server-side locator (`cosmo_detect_objects`, or an on-device Vision tool) returns
 /// candidate boxes to the model; the model picks the one that matches what it
 /// is looking at and passes it here. Naming it for the call it follows is what
@@ -40,17 +40,18 @@ public struct DrawBoxRequest: Sendable, Equatable {
 /// drawing. Coordinates are normalized to the frame the model was shown, so
 /// the app maps them onto the preview the same way it maps a Vision tool's
 /// `bounding_box`.
-public enum DrawAfterDetectTool {
+public enum DrawBoxTool {
     /// Wire name shipped in `tool-invocation` events; a rename is a wire break.
     /// Matches the backend regex `^[a-z][a-z0-9_]{2,63}$` (`client_declared.py`).
-    public static let name = "draw_after_detect"
+    public static let name = "cosmo_sdk_draw_box"
 
     /// Tool-group key for backend telemetry + brain-allowlisting.
     public static let group = "ui"
 
     public static var toolDescription: String {
         """
-        Draw a box on the user's screen around something cosmo_detect_objects located — pass a box \
+        Draw a box over the user's live view (their camera or screen preview) around \
+        something cosmo_detect_objects located — pass a box \
         it returned, normalized to the frame you were shown ([0,1], top-left origin), and an \
         optional short label. Call this after cosmo_detect_objects rather than guessing a box \
         yourself. Visual only — it measures nothing and changes nothing.
@@ -74,7 +75,7 @@ public enum DrawAfterDetectTool {
         )
     }
 
-    /// Decode a `draw_after_detect` invocation's arguments into a typed request.
+    /// Decode a `cosmo_sdk_draw_box` invocation's arguments into a typed request.
     /// Returns `nil` when the box is absent or malformed — a boundary check on
     /// model output, not an invariant. Coordinates are clamped to `[0,1]` so a
     /// model that overshoots the edge still yields a drawable box.
@@ -90,4 +91,62 @@ public enum DrawAfterDetectTool {
     }
 
     private static func clamp01(_ v: Double) -> Double { min(1, max(0, v)) }
+}
+
+/// Thrown by the SDK-provided draw tools when the model's arguments don't
+/// decode; surfaces as the invocation's error envelope.
+struct DrawRequestDecodeError: Error, LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+/// Decode an SDK-shipped tool's schema literal into the typed parameters
+/// ``SessionConfig/Tool/client(name:description:parameters:handler:)``
+/// carries. The literals are compile-time constants pinned by
+/// ``ClientToolSchemaDialectTests``, so a decode failure is a programmer
+/// error, not a runtime condition.
+func sdkToolParameters(fromJSON json: String) -> [String: JSONValue] {
+    // swiftlint:disable:next force_try
+    try! JSONDecoder().decode([String: JSONValue].self, from: Data(json.utf8))
+}
+
+extension SessionConfig.Tool {
+    /// The box renderer, ready to add to ``SessionConfig/tools`` alongside
+    /// the locator that feeds it:
+    ///
+    /// ```swift
+    /// tools: [.detectObjects, .drawBox { request in
+    ///     guard camera.isStreaming else {
+    ///         return .notShown("the camera is off — ask the user to turn it on")
+    ///     }
+    ///     show(request)
+    ///     return .shown
+    /// }]
+    /// ```
+    ///
+    /// The SDK owns both ends of the wire: it decodes and clamps the
+    /// arguments into a ``DrawBoxRequest`` on the main actor, and it turns
+    /// the returned ``DrawOutcome`` into the model's tool result. Your
+    /// handler owns only the drawing — and the honest answer about whether
+    /// it happened, since a box reported as shown but invisible leaves the
+    /// model talking about something the user cannot see. Malformed
+    /// arguments surface to the model as the invocation's error without
+    /// reaching your code.
+    public static func drawBox(
+        onDraw: @escaping @MainActor @Sendable (DrawBoxRequest) -> DrawOutcome
+    ) -> SessionConfig.Tool {
+        .sdkClient(SDKClientTool(
+            name: DrawBoxTool.name,
+            description: DrawBoxTool.toolDescription,
+            parameters: sdkToolParameters(fromJSON: DrawBoxTool.parametersJSON),
+            handler: { args in
+                guard let request = DrawBoxTool.request(from: args) else {
+                    throw DrawRequestDecodeError(
+                        message: "\(DrawBoxTool.name): pass box {x,y,width,height} normalized to [0,1]"
+                    )
+                }
+                return await MainActor.run { onDraw(request) }.toolResult
+            }
+        ))
+    }
 }

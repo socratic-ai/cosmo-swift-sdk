@@ -45,7 +45,7 @@ public struct SessionConfig: Sendable, Equatable {
     public var voice: Voice?
     /// The agent's audio pipeline — output emission, inbound noise
     /// cancellation, and the ambience bed. ``nil`` keeps every server
-    /// default (audio on, no cancellation, no ambience).
+    /// default (audio on, cancellation on, no ambience).
     public var audio: Audio?
     /// System instructions. Replaces the server's neutral default when
     /// set.
@@ -84,12 +84,6 @@ public struct SessionConfig: Sendable, Equatable {
     /// in the agent block and take part in equality; client callbacks are
     /// local-only (like client-tool handlers).
     public var hooks: [Hook]?
-    /// The screen-interaction capability declaration. Never authorable —
-    /// the SDK sets it mechanically iff the host supplied a
-    /// ``ScreenInteraction`` implementation (whose RPC handlers it
-    /// registers alongside); the server derives the grounded screen tools
-    /// from it.
-    var declaresScreenInteraction: Bool = false
 
     public init(
         agentName: String? = nil,
@@ -140,7 +134,6 @@ public struct SessionConfig: Sendable, Equatable {
             && lhs.maxSessionSeconds == rhs.maxSessionSeconds
             && lhs.storeRecording == rhs.storeRecording
             && lhs.serverHooks == rhs.serverHooks
-            && lhs.declaresScreenInteraction == rhs.declaresScreenInteraction
     }
 
     /// How the agent sounds: the prebuilt voice and the per-run speaking
@@ -199,7 +192,7 @@ public struct SessionConfig: Sendable, Equatable {
         /// (on).
         public var output: Bool?
         /// Enable upstream noise cancellation on the input audio. ``nil``
-        /// keeps the server default (off).
+        /// keeps the server default (on).
         public var noiseCancellation: Bool?
         /// Background-ambience bed on the assistant's output; present =
         /// enabled.
@@ -326,21 +319,38 @@ public struct SessionConfig: Sendable, Equatable {
         case examineImage
         /// Opt-in to the server-executed object locator that returns boxes —
         /// one per matching instance. Pairs with a client renderer
-        /// (`draw_after_detect`): the model picks one of the candidates and
+        /// (`cosmo_sdk_draw_box`): the model picks one of the candidates and
         /// passes it on. Zero-config; resolved-flow vocabulary.
         case detectObjects
         /// The point-returning sibling of ``detectObjects``, pairing with
-        /// `draw_after_point`.
+        /// `cosmo_sdk_draw_point`.
         case pointAtObject
+        /// A client tool the SDK ships, carrying its own handler.
+        ///
+        /// Its payload has no public initializer, so this case can only come
+        /// from an SDK factory (``drawBox(onDraw:)`` and friends). That is
+        /// what makes the ``cosmo_sdk_`` reservation hold: a caller cannot
+        /// hand-build a spec under an SDK tool's name, not even the exact
+        /// name, because they cannot build this payload at all.
+        case sdkClient(SDKClientTool)
+        /// The host's screen, offered to the server-executed locator
+        /// (`cosmo_screen_locate`) rather than to the model. Alone among the
+        /// cases here it is never advertised: it registers an RPC handler the
+        /// locator drives, and declaring it is what asks for the locator.
+        /// Its payload has no public initializer either — build it with
+        /// ``screenLocate(capture:)``.
+        case screenLocate(ScreenLocateTool)
 
         public var name: String {
             switch self {
             case let .client(name, _, _, _): return name
             case let .backgroundClient(name, _, _, _): return name
+            case let .sdkClient(tool): return tool.name
             case .webSearch: return "web_search"
             case .examineImage: return "examine_image"
             case .detectObjects: return "cosmo_detect_objects"
             case .pointAtObject: return "cosmo_point_at_object"
+            case .screenLocate: return "screen_locate"
             }
         }
 
@@ -352,13 +362,55 @@ public struct SessionConfig: Sendable, Equatable {
                 return ln == rn && ld == rd && lp == rp
             case let (.backgroundClient(ln, ld, lp, _), .backgroundClient(rn, rd, rp, _)):
                 return ln == rn && ld == rd && lp == rp
+            case let (.sdkClient(l), .sdkClient(r)):
+                return l == r
             case (.webSearch, .webSearch), (.examineImage, .examineImage),
-                (.detectObjects, .detectObjects), (.pointAtObject, .pointAtObject):
+                (.detectObjects, .detectObjects), (.pointAtObject, .pointAtObject),
+                // Zero-config like the opt-ins above: two capture slots declare
+                // the same capability, and the handler behind them is
+                // local-only, as with every other handler here.
+                (.screenLocate, .screenLocate):
                 return true
-            default:
+            // Every case is spelled out rather than caught by `default`: a
+            // case added to the enum then fails to compile here instead of
+            // silently comparing unequal to itself.
+            case (.client, _), (.backgroundClient, _), (.sdkClient, _),
+                (.webSearch, _), (.examineImage, _), (.detectObjects, _),
+                (.pointAtObject, _), (.screenLocate, _):
                 return false
             }
         }
+    }
+}
+
+/// A client tool the SDK ships: the declaration it owns plus the handler a
+/// caller supplied. Construct one through an SDK factory — there is no
+/// public initializer, which is precisely what keeps the ``cosmo_sdk_``
+/// namespace closed.
+public struct SDKClientTool: Sendable, Equatable {
+    /// Two are equal when they declare the same tool. The handler is a
+    /// local-only closure, excluded here as it is from the wire.
+    public static func == (lhs: SDKClientTool, rhs: SDKClientTool) -> Bool {
+        lhs.name == rhs.name
+            && lhs.description == rhs.description
+            && lhs.parameters == rhs.parameters
+    }
+
+    let name: String
+    let description: String
+    let parameters: [String: JSONValue]
+    let handler: ClientToolHandler
+
+    init(
+        name: String,
+        description: String,
+        parameters: [String: JSONValue],
+        handler: @escaping ClientToolHandler
+    ) {
+        self.name = name
+        self.description = description
+        self.parameters = parameters
+        self.handler = handler
     }
 }
 
@@ -371,6 +423,44 @@ public typealias ClientToolHandler =
     @Sendable ([String: JSONValue]) async throws -> [String: JSONValue]
 
 extension SessionConfig {
+    /// Client-tool names the SDK reserves for the tools it ships itself
+    /// (``SessionConfig/Tool/drawBox(onDraw:)`` and friends). A caller's own
+    /// tool must not use the prefix: the SDK owns those names and schemas, so
+    /// a collision would silently replace an SDK tool with something the
+    /// model was told behaves differently.
+    ///
+    /// Server tools hold the wider ``cosmo_`` namespace; this is the slice
+    /// carved out of it for client-executed SDK tools.
+    public static let sdkToolNamePrefix = "cosmo_sdk_"
+
+    /// Caught here rather than at the server's 422 so the message names the
+    /// offending tool and arrives while the caller is still looking at the
+    /// code that declared it.
+    func assertNoReservedToolNames() throws {
+        for tool in tools ?? [] {
+            // Both hand-built cases, because they serialize to the same
+            // ``kind: "client"`` wire shape — checking only ``.client``
+            // would leave ``.backgroundClient`` free to take an SDK name.
+            // ``.sdkClient`` is exempt by construction, not by name: a
+            // caller cannot build one, so there is nothing to allow-list
+            // and no way to shadow an SDK tool by matching its name exactly.
+            let declaredName: String?
+            switch tool {
+            case let .client(name, _, _, _): declaredName = name
+            case let .backgroundClient(name, _, _, _): declaredName = name
+            case .sdkClient, .webSearch, .examineImage, .detectObjects,
+                .pointAtObject, .screenLocate:
+                declaredName = nil
+            }
+            guard let name = declaredName, name.hasPrefix(Self.sdkToolNamePrefix)
+            else { continue }
+            throw RealtimeSessionError.invalidPayload(
+                "\(name): the \(Self.sdkToolNamePrefix) prefix is reserved for "
+                + "tools the SDK ships — rename your tool"
+            )
+        }
+    }
+
     /// The server half of the unified ``hooks`` list — wire config for the
     /// agent block; ``nil`` when there are none (stays off the wire).
     var serverHooks: [SilenceTimeout]? {
@@ -390,6 +480,7 @@ extension SessionConfig {
     /// ``RealtimeSessionConfig/session``. A sub-object with no set fields
     /// stays off the wire entirely, same as an unset leaf.
     func wirePayload() throws -> CosmoRealtimeAPI.Components.Schemas.RealtimeSessionConfig {
+        try assertNoReservedToolNames()
         let agent: CosmoRealtimeAPI.Components.Schemas.RealtimeSessionConfig.AgentPayload?
         if let agentName {
             // The catalog variant carries only per-run ride-alongs; a
@@ -428,13 +519,8 @@ extension SessionConfig {
         } else {
             // An explicit empty tool set and an unset one both serialize as
             // absent; the server applies its neutral default for absent.
-            var wireTools = try tools.flatMap { specs in
+            let wireTools = try tools.flatMap { specs in
                 specs.isEmpty ? nil : try specs.map { try $0.inlineWirePayload() }
-            }
-            if declaresScreenInteraction {
-                wireTools = (wireTools ?? []) + [
-                    .screenInteraction(.init(kind: .screenInteraction))
-                ]
             }
             let inline = CosmoRealtimeAPI.Components.Schemas.RealtimeInlineAgentConfig(
                 audio: audio?.wire,
@@ -468,14 +554,41 @@ extension SessionConfig {
     /// Client tools that carry a local handler, keyed by tool name. The
     /// transport registers an RPC method per entry so the agent can
     /// invoke them.
-    func clientToolHandlers() -> [String: ClientToolHandler] {
+    ///
+    /// Public so a host can invoke its own declared tool the way the session
+    /// will — reading a handler back cannot forge one, since an SDK-shipped
+    /// tool's still only comes from its factory.
+    public func clientToolHandlers() -> [String: ClientToolHandler] {
         var handlers: [String: ClientToolHandler] = [:]
         for tool in tools ?? [] {
             if case let .client(name, _, _, handler) = tool, let handler {
                 handlers[name] = handler
             }
+            if case let .sdkClient(sdkTool) = tool {
+                handlers[sdkTool.name] = sdkTool.handler
+            }
         }
         return handlers
+    }
+
+    /// Handlers registered by wire method name but never advertised — the
+    /// ``Tool/screenLocate(_:)`` slot, which a server tool drives directly.
+    /// Keyed by RPC method rather than tool name, since the model never sees it.
+    func rpcOnlyHandlers() -> [String: ClientToolHandler] {
+        var handlers: [String: ClientToolHandler] = [:]
+        for case let .screenLocate(capture) in tools ?? [] {
+            handlers[ScreenLocateTool.rpcMethod] = capture.handler()
+        }
+        return handlers
+    }
+
+    /// The capture slots this config declares, so the session can bind their
+    /// byte-stream publish once its transport is up.
+    var screenLocateTools: [ScreenLocateTool] {
+        (tools ?? []).compactMap { tool in
+            guard case let .screenLocate(capture) = tool else { return nil }
+            return capture
+        }
     }
 
     /// Background client tools that carry a handler, keyed by tool name. The
@@ -498,6 +611,15 @@ extension SessionConfig.Tool {
         -> CosmoRealtimeAPI.Components.Schemas.RealtimeInlineAgentConfig.ToolsPayloadPayload
     {
         switch self {
+        case .sdkClient(let sdkTool):
+            return .client(
+                .init(
+                    description: sdkTool.description,
+                    kind: .client,
+                    name: sdkTool.name,
+                    parameters: .init(additionalProperties: try objectContainer(from: sdkTool.parameters))
+                )
+            )
         case .client(let name, let description, let parameters, _),
             .backgroundClient(let name, let description, let parameters, _):
             // A background client tool is declared identically to a plain one;
@@ -518,6 +640,8 @@ extension SessionConfig.Tool {
             return .detectObjects(.init(kind: .detectObjects))
         case .pointAtObject:
             return .pointAtObject(.init(kind: .pointAtObject))
+        case .screenLocate:
+            return .screenLocate(.init(kind: .screenLocate))
         }
     }
 
@@ -525,6 +649,15 @@ extension SessionConfig.Tool {
         -> CosmoRealtimeAPI.Components.Schemas.RealtimeCatalogAgentConfig.ToolsPayloadPayload
     {
         switch self {
+        case .sdkClient(let sdkTool):
+            return .client(
+                .init(
+                    description: sdkTool.description,
+                    kind: .client,
+                    name: sdkTool.name,
+                    parameters: .init(additionalProperties: try objectContainer(from: sdkTool.parameters))
+                )
+            )
         case .client(let name, let description, let parameters, _),
             .backgroundClient(let name, let description, let parameters, _):
             return .client(
@@ -543,6 +676,8 @@ extension SessionConfig.Tool {
             return .detectObjects(.init(kind: .detectObjects))
         case .pointAtObject:
             return .pointAtObject(.init(kind: .pointAtObject))
+        case .screenLocate:
+            return .screenLocate(.init(kind: .screenLocate))
         }
     }
 }

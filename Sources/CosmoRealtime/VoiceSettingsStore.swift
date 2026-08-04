@@ -40,9 +40,8 @@ public struct VoiceSettingsStore {
 
     /// The user's explicit background-voice-cancellation choice, or ``nil``
     /// when they have never set it. Read at session start: ``nil`` leaves the
-    /// field off the wire so the server's per-surface default applies (the
-    /// first-party mobile app defaults it on server-side), while an explicit
-    /// choice is sent and always wins.
+    /// field off the wire so the protocol's own default applies (on), while
+    /// an explicit choice is sent and always wins.
     public var noiseCancellationPreference: Bool? {
         defaults.object(forKey: Self.noiseCancellationKey) == nil
             ? nil : defaults.bool(forKey: Self.noiseCancellationKey)

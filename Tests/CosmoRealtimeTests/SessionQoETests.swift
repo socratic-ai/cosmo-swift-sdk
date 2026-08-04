@@ -16,8 +16,7 @@ struct SessionQoETests {
     private func makeTransport() -> LiveKitSessionTransport {
         LiveKitSessionTransport(
             options: RealtimeSession.Options(
-                apiKey: "test-key",
-                baseURL: URL(string: "https://example.invalid")!
+                apiKey: "test-key"
             )
         )
     }

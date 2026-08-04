@@ -117,7 +117,7 @@
             "$ref": "#/components/schemas/RealtimeAmbienceConfig"
           },
           "noise_cancellation": {
-            "default": false,
+            "default": true,
             "title": "Noise Cancellation",
             "type": "boolean"
           },
@@ -249,7 +249,7 @@
                   "detect_objects": "#/components/schemas/RealtimeDetectObjectsToolSpec",
                   "examine_image": "#/components/schemas/RealtimeExamineImageToolSpec",
                   "point_at_object": "#/components/schemas/RealtimePointAtObjectToolSpec",
-                  "screen_interaction": "#/components/schemas/RealtimeScreenInteractionSpec",
+                  "screen_locate": "#/components/schemas/RealtimeScreenLocateToolSpec",
                   "server": "#/components/schemas/RealtimeServerToolSpec",
                   "web_search": "#/components/schemas/RealtimeWebSearchToolSpec"
                 },
@@ -269,9 +269,6 @@
                   "$ref": "#/components/schemas/RealtimeWebSearchToolSpec"
                 },
                 {
-                  "$ref": "#/components/schemas/RealtimeScreenInteractionSpec"
-                },
-                {
                   "$ref": "#/components/schemas/RealtimeExamineImageToolSpec"
                 },
                 {
@@ -279,6 +276,9 @@
                 },
                 {
                   "$ref": "#/components/schemas/RealtimePointAtObjectToolSpec"
+                },
+                {
+                  "$ref": "#/components/schemas/RealtimeScreenLocateToolSpec"
                 }
               ]
             },
@@ -1000,7 +1000,7 @@
                   "detect_objects": "#/components/schemas/RealtimeDetectObjectsToolSpec",
                   "examine_image": "#/components/schemas/RealtimeExamineImageToolSpec",
                   "point_at_object": "#/components/schemas/RealtimePointAtObjectToolSpec",
-                  "screen_interaction": "#/components/schemas/RealtimeScreenInteractionSpec",
+                  "screen_locate": "#/components/schemas/RealtimeScreenLocateToolSpec",
                   "server": "#/components/schemas/RealtimeServerToolSpec",
                   "web_search": "#/components/schemas/RealtimeWebSearchToolSpec"
                 },
@@ -1020,9 +1020,6 @@
                   "$ref": "#/components/schemas/RealtimeWebSearchToolSpec"
                 },
                 {
-                  "$ref": "#/components/schemas/RealtimeScreenInteractionSpec"
-                },
-                {
                   "$ref": "#/components/schemas/RealtimeExamineImageToolSpec"
                 },
                 {
@@ -1030,6 +1027,9 @@
                 },
                 {
                   "$ref": "#/components/schemas/RealtimePointAtObjectToolSpec"
+                },
+                {
+                  "$ref": "#/components/schemas/RealtimeScreenLocateToolSpec"
                 }
               ]
             },
@@ -1286,13 +1286,13 @@
         "title": "RealtimeSay",
         "type": "object"
       },
-      "RealtimeScreenInteractionSpec": {
+      "RealtimeScreenLocateToolSpec": {
         "additionalProperties": false,
-        "description": "Declares the client's screen-interaction capability.\n\nNot an authorable tool: SDKs emit this entry mechanically when the host\nsupplies a screen-interaction implementation, alongside registering the\n``screen_interaction_*`` RPC handlers it announces. The server derives\nthe grounded screen tools it offers the model (spotlight, click) from\nthis declaration \u2014 which tools exist behind it is server-owned and can\nchange without a wire or SDK change.\n\nZero-config; unknown fields are a schema error. Availability is a\nworkspace policy (desktop control): a session that cannot run it starts\nwithout the screen tools and reports the drop on\n``ready.rejected_tools`` under the name ``screen_interaction``.",
+        "description": "Opt-in to the server-executed screen locator.\n\nResolves a description to an element on the client's shared screen and\nhands the model a ref addressing it, which the model passes to whichever\nscreen renderer the client declared (``cosmo_sdk_screen_click`` /\n``cosmo_sdk_screen_highlight``). Not authorable: SDKs emit this entry\nmechanically when the host supplies a screen-capture handler, whose\n``screen_capture`` RPC the locator drives. Zero-config;\nunknown fields are a schema error.\n\nThe locator itself has no availability gate. ``cosmo_sdk_screen_click``\ndoes \u2014 clicking acts on the user's machine, so it stays behind the\ndesktop-control policy, and a session that cannot run it starts without\nit and reports the drop on ``ready.rejected_tools`` under that name.",
         "properties": {
           "kind": {
-            "const": "screen_interaction",
-            "default": "screen_interaction",
+            "const": "screen_locate",
+            "default": "screen_locate",
             "title": "Kind",
             "type": "string"
           }
@@ -1300,7 +1300,7 @@
         "required": [
           "kind"
         ],
-        "title": "RealtimeScreenInteractionSpec",
+        "title": "RealtimeScreenLocateToolSpec",
         "type": "object"
       },
       "RealtimeServerEnvelope": {
@@ -2366,58 +2366,7 @@
     },
     "/api/v1/external/realtime/session/start": {
       "post": {
-        "operationId": "start_realtime_session_legacy",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RealtimeSessionConfig"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RealtimeSessionResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RealtimeErrorEnvelope"
-                }
-              }
-            },
-            "description": "Rejected \u2014 see error.code (typed rejections) and error.errors (field-level validation)"
-          }
-        },
-        "security": [
-          {
-            "ApiKeyAuth": []
-          }
-        ],
-        "summary": "External Realtime Session Start Endpoint",
-        "tags": [
-          "external-realtime"
-        ],
-        "x-auth-type": "external_api",
-        "x-required-scopes": [
-          "realtime:use"
-        ],
-        "x-workspace-exempt": true
-      }
-    },
-    "/api/v1/external/realtime/session/start-resolved": {
-      "post": {
-        "description": "Start a session on the resolved-spec flow: the config is resolved\nagainst the caller's workspace into a ``ResolvedSessionSpec`` and\ndispatched; no ``RealtimeClientInit`` translation.",
+        "description": "Start a session on the resolved-spec flow: the config is resolved\nagainst the caller's workspace into a ``ResolvedSessionSpec`` and\ndispatched; no ``RealtimeClientInit`` translation. A saved agent is\nlaunched by reference (``agent: {type: \"catalog\", name}``) \u2014 resolution\nstamps the session's agent linkage itself, so there is no out-of-band\nattribution channel.",
         "operationId": "start_realtime_session",
         "requestBody": {
           "content": {
@@ -2467,9 +2416,61 @@
         "x-workspace-exempt": true
       }
     },
+    "/api/v1/external/realtime/session/start-legacy": {
+      "post": {
+        "deprecated": true,
+        "operationId": "start_realtime_session_legacy",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RealtimeSessionConfig"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RealtimeSessionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RealtimeErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rejected \u2014 see error.code (typed rejections) and error.errors (field-level validation)"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "External Realtime Session Start Endpoint",
+        "tags": [
+          "external-realtime"
+        ],
+        "x-auth-type": "external_api",
+        "x-required-scopes": [
+          "realtime:use"
+        ],
+        "x-workspace-exempt": true
+      }
+    },
     "/api/v1/external/realtime/session/{session_id}/dial": {
       "post": {
-        "description": "Place an outbound phone call into a running realtime session.\n\nThe dialed party joins the session's LiveKit room as a SIP\nparticipant and the agent \u2014 already in the room \u2014 converses with\nthem. Requires ``realtime:use`` plus the workspace's phone-calls\nsetting enabled, and is bound by its weekly per-user minute limit.\nAn unknown or ended session is rejected (404 / 409).",
+        "description": "Place an outbound phone call into a running realtime session.\n\nThe dialed party joins the session's LiveKit room as a SIP\nparticipant and the agent \u2014 already in the room \u2014 converses with\nthem. Requires an API key carrying ``realtime:use`` plus the\nworkspace's phone-calls setting enabled, and is bound by its weekly\nper-user minute limit. A minted end-user token is rejected (403\n``dial_requires_api_key``); an unknown or ended session is rejected\n(404 / 409).",
         "operationId": "dial_realtime_session",
         "parameters": [
           {

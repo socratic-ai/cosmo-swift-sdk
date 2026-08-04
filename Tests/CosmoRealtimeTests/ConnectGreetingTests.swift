@@ -190,8 +190,7 @@ import Testing
                         systemPrompt: nil,
                         speakingStyle: nil,
                         agentName: agent,
-                        dictation: false,
-                        screenInteractionEnabled: false
+                        dictation: false
                     )
                     let predicted = VoiceSession.configGreeting(
                         connectGreeting: greeting, resumeFromCallId: resume, agentName: agent

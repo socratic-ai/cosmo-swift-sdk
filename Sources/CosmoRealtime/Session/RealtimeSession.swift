@@ -9,7 +9,7 @@ import os
 ///
 /// ```swift
 /// let session = try await RealtimeSession.start(
-///     .init(apiKey: "key", baseURL: URL(string: "https://app.askcosmo.ai")!),
+///     .init(apiKey: "key"),
 ///     config: SessionConfig(instructions: "You are a terse assistant.")
 /// )
 /// for try await event in session.events {
@@ -70,7 +70,12 @@ public actor RealtimeSession {
         }
 
         public var credential: Credential
-        public var baseURL: URL
+        /// The Cosmo API origin, resolved from `COSMO_BASE_URL` (else
+        /// production) when these options are built. Read-only: an app that
+        /// chooses a backend publishes it to its own environment, so one
+        /// process talks to one backend and a stored credential cannot be
+        /// sent somewhere it was not issued for.
+        public internal(set) var baseURL: URL
         /// Timeout for the media-transport join (signaling + ICE).
         public var connectTimeout: TimeInterval
         /// Timeout for the REST session-start request. Sized separately
@@ -97,14 +102,13 @@ public actor RealtimeSession {
 
         public init(
             credential: Credential,
-            baseURL: URL,
             connectTimeout: TimeInterval = 30,
             requestTimeout: TimeInterval = 45,
             verifyTLS: VerifyTLS = .auto,
             clientIdentity: ClientIdentity? = nil
         ) {
             self.credential = credential
-            self.baseURL = baseURL
+            self.baseURL = RealtimeBaseURL.resolve()
             self.connectTimeout = connectTimeout
             self.requestTimeout = requestTimeout
             self.verifyTLS = verifyTLS
@@ -114,7 +118,6 @@ public actor RealtimeSession {
         /// Convenience: a workspace api-key credential.
         public init(
             apiKey: String,
-            baseURL: URL,
             connectTimeout: TimeInterval = 30,
             requestTimeout: TimeInterval = 45,
             verifyTLS: VerifyTLS = .auto,
@@ -122,7 +125,6 @@ public actor RealtimeSession {
         ) {
             self.init(
                 credential: .apiKey(apiKey),
-                baseURL: baseURL,
                 connectTimeout: connectTimeout,
                 requestTimeout: requestTimeout,
                 verifyTLS: verifyTLS,
@@ -133,7 +135,6 @@ public actor RealtimeSession {
         /// Convenience: a minted per-user JWT credential.
         public init(
             token: String,
-            baseURL: URL,
             connectTimeout: TimeInterval = 30,
             requestTimeout: TimeInterval = 45,
             verifyTLS: VerifyTLS = .auto,
@@ -141,7 +142,6 @@ public actor RealtimeSession {
         ) {
             self.init(
                 credential: .token(token),
-                baseURL: baseURL,
                 connectTimeout: connectTimeout,
                 requestTimeout: requestTimeout,
                 verifyTLS: verifyTLS,
@@ -444,6 +444,7 @@ public actor RealtimeSession {
                 configFrame: configFrame,
                 callbacks: callbacks,
                 clientToolHandlers: config.clientToolHandlers()
+                    .merging(config.rpcOnlyHandlers()) { _, rpcOnly in rpcOnly }
                     .merging(rpcHandlers) { _, registerOnly in registerOnly },
                 backgroundClientToolHandlers: config.backgroundClientToolHandlers(),
                 clientToolJobSink: sink,
@@ -486,6 +487,20 @@ public actor RealtimeSession {
         sessionId = info.sessionId
         lifecycle = .connected
         statesContinuation.yield(.connected)
+        // A capture only fires once the locator calls, well after this, so the
+        // late bind never races. Weak because the transport retains the
+        // handlers, which retain the capture slot — binding self strongly
+        // would close the loop back into the session.
+        for capture in config.screenLocateTools {
+            capture.bindPublish { [weak self] data, topic in
+                guard let self else {
+                    throw ScreenToolError(
+                        message: "\(ScreenLocateTool.rpcMethod): session ended before publish"
+                    )
+                }
+                try await self.send(bytes: data, topic: topic)
+            }
+        }
         // The transport publishes the mic during connect, so this client is the
         // human voice: bind the agent's input.
         await _sendBindInput()
@@ -920,6 +935,9 @@ public enum RealtimeSessionError: Error, LocalizedError, Equatable {
     /// Screen share could not be started because the LiveKit
     /// ``BufferCapturer`` could not be created.
     case screenShareUnavailable
+    /// A video publish (stream or screen share) is already active on
+    /// this session; remove or stop it before starting another.
+    case videoPublishAlreadyActive
     /// The base URL is plain `http` to a non-loopback host; a bearer
     /// credential must not travel over cleartext.
     case insecureBaseURL(String)
@@ -948,6 +966,8 @@ public enum RealtimeSessionError: Error, LocalizedError, Equatable {
             return "Invalid wire payload: \(detail)"
         case .screenShareUnavailable:
             return "Screen share is unavailable: LiveKit BufferCapturer could not be created."
+        case .videoPublishAlreadyActive:
+            return "A video publish is already active on this session; remove or stop it before starting another."
         case .insecureBaseURL(let url):
             return "Realtime base URL must use https (http allowed only for localhost): \(url)"
         }

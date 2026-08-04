@@ -1,6 +1,7 @@
 import Foundation
 import os.lock
 import Testing
+import LiveKit
 @testable import CosmoRealtime
 
 /// Mirrors the legacy ``ScreenShareStateTests`` for the new external-
@@ -22,8 +23,7 @@ struct SessionScreenShareTests {
     private func makeTransport() -> LiveKitSessionTransport {
         LiveKitSessionTransport(
             options: RealtimeSession.Options(
-                apiKey: "test-key",
-                baseURL: URL(string: "https://example.invalid")!
+                apiKey: "test-key"
             )
         )
     }
@@ -199,6 +199,85 @@ struct SessionScreenShareTests {
         // No active share installed: push is a no-op, processor install
         // never runs. Neither should crash or install state.
         transport.setScreenShareFrameProcessor { buffer in buffer }
+        #expect(!(await transport._testScreenShareLockHasValue()))
+    }
+}
+
+/// The non-screen video-stream publish: same single slot and deferred
+/// publish as the screen share, but a camera-source track behind a
+/// pushable handle. Runs fully offline — the detached-room hook passes
+/// the start guard and no frame is ever pushed, so no publish fires.
+@Suite("Video-stream publish")
+struct VideoStreamPublishTests {
+
+    private func makeTransport() -> LiveKitSessionTransport {
+        LiveKitSessionTransport(
+            options: RealtimeSession.Options(apiKey: "test-key")
+        )
+    }
+
+    @Test("addVideoStream without a connected room throws .notConnected")
+    func addWithoutRoomThrows() async throws {
+        let transport = makeTransport()
+        await #expect(throws: RealtimeSessionError.notConnected) {
+            _ = try await transport.addVideoStream()
+        }
+        #expect(!(await transport._testScreenShareLockHasValue()))
+    }
+
+    @Test("addVideoStream publishes a camera-source track")
+    func addInstallsCameraSourceTrack() async throws {
+        let transport = makeTransport()
+        await transport._testInstallDetachedRoom()
+
+        _ = try await transport.addVideoStream()
+
+        let state = await transport._testCurrentScreenShareState()
+        #expect(state?.source == .camera, "video streams carry the camera source — the wire label for 'not the user's screen'")
+        #expect(state?.track.name == Track.cameraName)
+    }
+
+    @Test("one video publish at a time, in both directions")
+    func slotIsExclusive() async throws {
+        let transport = makeTransport()
+        await transport._testInstallDetachedRoom()
+
+        _ = try await transport.addVideoStream()
+        await #expect(throws: RealtimeSessionError.videoPublishAlreadyActive) {
+            _ = try await transport.addVideoStream()
+        }
+        // A live video stream must not be silently torn down by a share.
+        await #expect(throws: RealtimeSessionError.videoPublishAlreadyActive) {
+            try await transport.startScreenShare()
+        }
+
+        // And the reverse: a live share blocks a video stream.
+        let shared = makeTransport()
+        await shared._testInstallDetachedRoom()
+        try await shared.startScreenShare()
+        await #expect(throws: RealtimeSessionError.videoPublishAlreadyActive) {
+            _ = try await shared.addVideoStream()
+        }
+    }
+
+    @Test("removeVideoStream is identity-keyed and stopScreenShare never touches it")
+    func removalIsIdentityKeyed() async throws {
+        let transport = makeTransport()
+        await transport._testInstallDetachedRoom()
+
+        let handle = try await transport.addVideoStream()
+        // stopScreenShare is scoped to screen-source state: the stream stays.
+        await transport.stopScreenShare()
+        #expect(await transport._testScreenShareLockHasValue())
+
+        await transport.removeVideoStream(handle)
+        #expect(!(await transport._testScreenShareLockHasValue()))
+
+        // A stale handle is a no-op against a newer publish.
+        let second = try await transport.addVideoStream()
+        await transport.removeVideoStream(handle)
+        #expect(await transport._testScreenShareLockHasValue())
+        await transport.removeVideoStream(second)
         #expect(!(await transport._testScreenShareLockHasValue()))
     }
 }
