@@ -75,7 +75,7 @@ extension RealtimeSession {
         case toolInvocation(ToolInvocation)
         /// Server is transparently rotating the upstream session.
         case reconnecting(Reconnecting)
-        /// A first-party Cosmo event (token usage, conversation handle). The
+        /// A first-party Cosmo event (token usage). The
         /// server emits these for first-party sessions; delivery is not gated on
         /// the client having sent a ``SessionConfig/cosmo`` block.
         case cosmo(CosmoEvent)
@@ -103,7 +103,6 @@ extension RealtimeSession {
     public enum CosmoEvent: Sendable {
         /// Cumulative token usage for the session.
         case usage(CosmoUsage)
-        /// The session's backing Cosmo conversation handle.
     }
 }
 

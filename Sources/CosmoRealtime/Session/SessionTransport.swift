@@ -1,9 +1,20 @@
+import AVFAudio
 import CoreMedia
+import CosmoRealtimeAPI
 import Foundation
+
+/// Internal name for the generated session-start response. Not public: the
+/// session surfaces ``RealtimeSession/sessionId`` and
+/// ``RealtimeSession/connectTimings`` from it instead of handing out the join
+/// credentials the transport already spent.
+typealias RealtimeSessionResponse =
+    CosmoRealtimeAPI.Components.Schemas.RealtimeSessionResponse
 
 /// Result of a successful transport-level session start.
 struct SessionStartInfo: Sendable {
-    let sessionId: String
+    let response: RealtimeSessionResponse
+
+    var sessionId: String { response.sessionId }
 }
 
 /// Typed start failures a transport can raise from
@@ -20,6 +31,11 @@ enum SessionStartFailure: Error, Sendable {
     /// The start never reached a server verdict (network failure,
     /// timeout, malformed success payload).
     case transport(message: String)
+    /// The credential could not be resolved before the request went out —
+    /// a ``TokenSource`` fetch failed in the auth middleware. Carried
+    /// un-erased so ``RealtimeSession`` can rethrow the ``MintTokenError``
+    /// (and its slug) to the ``start`` caller, matching the other SDKs.
+    case credential(MintTokenError)
 }
 
 /// How a transport reports asynchronous activity back to the session.
@@ -137,14 +153,26 @@ protocol SessionTransport: Sendable {
     /// and idempotent: a stale handle is a no-op.
     func removeVideoStream(_ handle: VideoStreamHandle) async
 
-    // MARK: QoE
+    // MARK: Audio streams
 
-    /// Per-session WebRTC quality aggregated so far: connect-phase and
-    /// server-side start timings, sampled jitter / RTT / jitter-buffer
-    /// summaries, screen-share send health, freeze/packet-loss counters,
-    /// and a connection-quality summary. Safe to read at any time; read
-    /// it at session end for the final rollup.
-    nonisolated var qoeSnapshot: SessionQoESnapshot { get }
+    /// Take the session's voice for a caller-owned audio publish. Publishes
+    /// the local audio track if it is not already publishing and silences the
+    /// device microphone for the duration, so the agent hears exactly the
+    /// pushed buffers. Throws
+    /// ``RealtimeSessionError/audioPublishAlreadyActive`` while one is running.
+    func startAudioStream() async throws
+    /// Push one buffer into the running stream; inert when none is.
+    nonisolated func pushAudioBuffer(_ buffer: AVAudioPCMBuffer)
+    /// Put back what the stream displaced, reporting whether the microphone
+    /// holds the voice afterwards. Idempotent.
+    @discardableResult
+    func stopAudioStream() async -> Bool
+
+    // MARK: Connect timings
+
+    /// Connect-latency breakdown: the client-measured connect phases plus
+    /// the server's own session-start timings.
+    nonisolated var connectTimings: SessionConnectTimings { get }
 }
 
 extension SessionTransport {

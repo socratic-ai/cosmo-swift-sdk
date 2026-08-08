@@ -10,13 +10,12 @@ struct ClientToolSchemaDialectTests {
         // is silently dropped — it must never reach the model. Pin each one.
         #expect(ClientToolSchemaDialect.firstViolation(inSchemaJSON: DrawBoxTool.parametersJSON) == nil)
         #expect(ClientToolSchemaDialect.firstViolation(inSchemaJSON: DrawPointTool.parametersJSON) == nil)
-        #expect(ClientToolSchemaDialect.firstViolation(inSchemaJSON: DrawPathTool.parametersJSON) == nil)
         #expect(ClientToolSchemaDialect.firstViolation(inSchemaJSON: ScreenClickTool.parametersJSON) == nil)
         #expect(
             ClientToolSchemaDialect.firstViolation(inSchemaJSON: ScreenHighlightTool.parametersJSON)
                 == nil)
         #expect(
-            ClientToolSchemaDialect.firstViolation(inSchemaJSON: HighlightRegionTool.parametersJSON)
+            ClientToolSchemaDialect.firstViolation(inSchemaJSON: ScreenHighlightBoxTool.parametersJSON)
                 == nil)
     }
 

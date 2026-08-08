@@ -3,10 +3,11 @@ import HTTPTypes
 import OpenAPIRuntime
 
 /// Injects ``Authorization: Bearer <token>`` on every outbound request.
-/// The bearer value is either a workspace api key or a minted per-user
-/// JWT — indistinguishable on the wire.
+/// The bearer value is a workspace api key, a minted per-user JWT, or a
+/// source-fetched JWT — indistinguishable on the wire. Resolved per request
+/// so a ``TokenSource`` credential can refresh between calls.
 struct BearerAuthMiddleware: ClientMiddleware {
-    let bearerToken: String
+    let credential: RealtimeSession.Options.Credential
 
     func intercept(
         _ request: HTTPRequest,
@@ -16,16 +17,15 @@ struct BearerAuthMiddleware: ClientMiddleware {
         next: (HTTPRequest, HTTPBody?, URL) async throws -> (HTTPResponse, HTTPBody?)
     ) async throws -> (HTTPResponse, HTTPBody?) {
         var req = request
-        req.headerFields[.authorization] = "Bearer \(bearerToken)"
+        req.headerFields[.authorization] = "Bearer \(try await credential.bearerToken())"
         return try await next(req, body, baseURL)
     }
 }
 
-/// Injects the first-party prepared-room ref on ``/session/start``. The
-/// session-config request body is the published developer schema, which
-/// deliberately doesn't model the prepare-room feature — so first-party
-/// clients send the ref as headers and the backend folds it back into the
-/// typed request.
+/// Names the room a session start should be dispatched into, when the client
+/// created one ahead of the start. Sent as headers because the session-config
+/// request body describes the agent and the run, not the room the caller
+/// already holds; the backend folds the ref back into the typed request.
 struct PreparedRoomHeaderMiddleware: ClientMiddleware {
     static let roomNameField = HTTPField.Name("x-cosmo-prepared-room-name")!
     static let roomGrantField = HTTPField.Name("x-cosmo-prepared-room-grant")!
@@ -46,29 +46,3 @@ struct PreparedRoomHeaderMiddleware: ClientMiddleware {
         return try await next(req, body, baseURL)
     }
 }
-
-/// Injects the calling client's identity on every generated-client request.
-/// The `URLRequest` counterpart is ``ClientIdentity/apply(to:)``; both read
-/// ``ClientHeaderName``.
-struct ClientIdentityMiddleware: ClientMiddleware {
-    static let clientField = HTTPField.Name(ClientHeaderName.client)!
-    static let versionField = HTTPField.Name(ClientHeaderName.version)!
-    static let buildField = HTTPField.Name(ClientHeaderName.build)!
-
-    let identity: ClientIdentity
-
-    func intercept(
-        _ request: HTTPRequest,
-        body: HTTPBody?,
-        baseURL: URL,
-        operationID: String,
-        next: (HTTPRequest, HTTPBody?, URL) async throws -> (HTTPResponse, HTTPBody?)
-    ) async throws -> (HTTPResponse, HTTPBody?) {
-        var req = request
-        req.headerFields[Self.clientField] = identity.client
-        req.headerFields[Self.versionField] = identity.marketingVersion
-        req.headerFields[Self.buildField] = identity.build
-        return try await next(req, body, baseURL)
-    }
-}
-

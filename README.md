@@ -20,7 +20,7 @@ Native async/await Swift client for the Cosmo Realtime API.
 dependencies: [
     .package(
         url: "https://github.com/socratic-ai/cosmo-swift-sdk",
-        .upToNextMinor(from: "0.3.0")
+        .upToNextMinor(from: "0.4.0")
     ),
 ],
 targets: [
@@ -38,6 +38,22 @@ targets: [
 Or add via Xcode: **File → Add Package Dependencies…**, paste
 `https://github.com/socratic-ai/cosmo-swift-sdk`, and pick
 **Up to Next Minor Version**.
+
+## Teach your agent
+
+One [Agent Skill](https://agentskills.io) covers the whole Cosmo SDK
+family (TypeScript, Python, Swift): the current SDK API, the credential
+and login rules, and the production token flow. It teaches coding agents
+(Claude Code, Cursor, Codex CLI, Gemini CLI, …) — install it once per
+machine or project:
+
+```bash
+npx skills add socratic-ai/cosmo-ai
+```
+
+Agents can also read the docs directly:
+https://platform.askcosmo.ai/docs (`/llms.txt`, `/llms-full.txt`, and an
+MCP endpoint at `/docs/api/mcp`).
 
 ## Quickstart
 
@@ -121,18 +137,32 @@ Client-level settings; pass once per `start`.
 | `connectTimeout` | `TimeInterval` | `30` |
 | `requestTimeout` | `TimeInterval` | `45` |
 | `verifyTLS` | `VerifyTLS` | `.auto` |
-| `clientIdentity` | `ClientIdentity?` | `nil` |
 
-`Credential` has two forms, and which one you use is a deployment decision:
+`Credential` has three forms, and which one you use is a deployment decision:
 
 ```swift
 // Workspace-scoped key. Server-side only — it opens sessions AND mints
-// end-user tokens. Never embed it in a distributed app.
+// end-user tokens (minting ships in the opt-in CosmoRealtimeMint product:
+// `import CosmoRealtimeMint`). Never embed it in a distributed app.
 RealtimeSession.Options(apiKey: "cosmo_…")
 
 // A minted per-user JWT, scoped to one external user. Safe to ship in a
 // device or browser: it opens sessions but cannot mint.
 RealtimeSession.Options(token: jwt)
+
+// A TokenSource: the SDK fetches the JWT from your minting endpoint,
+// caches it, and re-fetches as expiry nears — no refresh code in the app.
+RealtimeSession.Options(tokenSource: try .endpoint(
+    URL(string: "https://your-backend.example.com/token")!,
+    headers: ["Authorization": "Bearer \(appSession)"]
+))
+
+// Zero-argument: resolves an API key itself — COSMO_API_KEY, else the
+// `cosmo login` credentials file (~/.cosmo/credentials, profile from
+// COSMO_PROFILE; the CLI installs with `pipx install cosmo-cli`),
+// adopting the backend the stored key was issued for.
+// Throws CredentialsError when nothing usable resolves.
+try RealtimeSession.Options()
 ```
 
 `baseURL` is not an argument. It resolves from `COSMO_BASE_URL` — the same
@@ -144,14 +174,12 @@ a separate member-facing surface with its own workspaces, and a key minted on
 one surface fails as a `401` on the other.
 
 An app that picks its backend at launch (a GUI app has no inherited
-environment) publishes the choice with `setenv` before starting a session —
-see `AppModel.publishBackendToEnvironment` in the Cosmo Mac app. One process,
-one backend.
+environment) publishes the choice with `setenv` before starting a session.
+One process, one backend.
 
 `verifyTLS` defaults to `.auto`, which skips verification only for loopback
 hosts so a self-signed local-dev backend works; remote hosts are always
-verified. `clientIdentity` identifies your app to the backend; `nil` sends no
-client headers.
+verified.
 
 ### `SessionConfig`
 
@@ -274,10 +302,6 @@ That reduction is correct for the common path. Two cases need more:
   arrives after the endpointer already committed an utterance carries only the
   remainder, so replacing on it drops the committed prefix.
 
-`TranscriptReducer` folds events into `[TranscriptLine]` for you and handles
-the first case. It doesn't yet handle the second — a text-only session that
-reduces user transcripts this way loses the committed prefix.
-
 ### Sends
 
 ```swift
@@ -290,6 +314,18 @@ await session.waitUntilEnded()  // returns once the session is over
 
 Client tools aren't sent here — declare a handler on the tool spec and the
 SDK runs it over the transport when the agent invokes it.
+
+For audio the SDK can't capture itself — a synthetic generator, file replay,
+or a host with no usable microphone — publish it yourself:
+
+```swift
+try await session.startAudioStream()
+audio.push(pcmBuffer)               // from your render callback
+await session.stopAudioStream()
+```
+
+While the stream is live the device microphone is silenced, so the agent hears
+exactly the buffers you push; removing it restores the microphone.
 
 `waitUntilEnded()` returns once the session has ended for any reason (`end()`,
 a server-side stop, or a transport drop). It's the supported way to keep a
@@ -349,14 +385,14 @@ mid-call.
 
 ### Live e2e (`HooksExample`)
 
-`HelloRealtime/Sources/HooksExample` in the [examples repo](https://github.com/socratic-ai/cosmo-examples/tree/main/swift) is a self-contained runnable
+`HelloRealtime/Sources/HooksExample` in the [examples repo](https://github.com/socratic-ai/cosmo-ai/tree/main/examples/swift) is a self-contained runnable
 harness that exercises all four hooks in one headless session: SessionStart
 (inject caller context), PreToolUse/deny (block `delete_account` before it
 runs), PreToolUse/rewrite (force `account=primary` on `get_account_balance`),
 PostToolUse (observe outcome), and SessionEnd (observe exit reason).
 
 ```bash
-git clone https://github.com/socratic-ai/cosmo-examples && cd cosmo-examples/swift/HelloRealtime
+git clone https://github.com/socratic-ai/cosmo-ai && cd cosmo-ai/examples/swift/HelloRealtime
 COSMO_API_KEY=cosmo_… swift run HooksExample
 ```
 
@@ -367,10 +403,11 @@ suppresses it before the handler is invoked.
 ## Skills
 
 Attach **Agent Skills** (the `SKILL.md` standard) to the model through the
-`Agent` layer. Parsed skills become a single resident `load_skill` tool plus a
-hot-set menu appended to `SessionConfig.instructions`; the model calls
-`load_skill(name)` when the conversation reaches a skill's path and receives
-the body as private, never-spoken instructions for the rest of the call.
+`Agent` layer. Parsed skills become a single resident `cosmo_sdk_load_skill`
+tool plus a hot-set menu appended to `SessionConfig.instructions`; the model
+calls `cosmo_sdk_load_skill(name)` when the conversation reaches a skill's path
+and receives the body as private, never-spoken instructions for the rest of the
+call.
 
 ```swift
 let skills = [try parseSkillMd(refundsMarkdown, defaultName: "refunds")]
@@ -378,14 +415,14 @@ let agent = try Agent(skills: skills)
 let session = try await agent.start(
     RealtimeSession.Options(token: jwt),
     config: SessionConfig(instructions: "You are a terse support agent."))
-// the menu is now resident; the model can call load_skill("refunds")
+// the menu is now resident; the model can call cosmo_sdk_load_skill("refunds")
 await session.end()
 ```
 
 `Agent.init` **throws**: duplicate skill names are rejected when the agent is
 built, not mid-call. `Agent` composes skills, MCP, and caller tools together —
 all land in `SessionConfig.tools`. Every attached skill rides resident as
-`name` + `description`; only the body is deferred to `load_skill`. Unknown
+`name` + `description`; only the body is deferred to `cosmo_sdk_load_skill`. Unknown
 `SKILL.md` frontmatter keys (`tier`, `allowed-tools`, `license`, …) are
 accepted and ignored, so documents authored for other harnesses stay valid.
 
@@ -455,26 +492,26 @@ only ever `import CosmoRealtime`.
 
 ## Example
 
-See [`HelloRealtime/`](https://github.com/socratic-ai/cosmo-examples/tree/main/swift/HelloRealtime) in the examples repo for a runnable macOS
+See [`HelloRealtime/`](https://github.com/socratic-ai/cosmo-ai/tree/main/examples/swift/HelloRealtime) in the examples repo for a runnable macOS
 command-line program that connects, declares a typed client tool, listens for
 transcripts, sends a text message, and disconnects — no audio required.
 
 ```bash
-git clone https://github.com/socratic-ai/cosmo-examples && cd cosmo-examples/swift/HelloRealtime
+git clone https://github.com/socratic-ai/cosmo-ai && cd cosmo-ai/examples/swift/HelloRealtime
 COSMO_API_KEY=cosmo_… swift run
 ```
 
-`HooksExample`, `SkillsExample`, and `MCPExample` live alongside it as
-`swift run <target>` programs.
+`BackgroundToolExample`, `HooksExample`, `SkillsExample`, and `MCPExample` live
+alongside it as `swift run <target>` programs.
 
-[`Cartographer/`](https://github.com/socratic-ai/cosmo-examples/tree/main/swift/Cartographer) is the GUI counterpart: a
+[`Cartographer/`](https://github.com/socratic-ai/cosmo-ai/tree/main/examples/swift/Cartographer) is the GUI counterpart: a
 SwiftUI macOS app that draws a live mind map from what you say, with client
 tools mutating on-screen state and hooks enforcing an app-side limit. Its
 `bundle.sh` is also the reference for packaging a SwiftPM-built `.app` that can
 actually reach the microphone.
 
 ```bash
-git clone https://github.com/socratic-ai/cosmo-examples && cd cosmo-examples/swift/Cartographer
+git clone https://github.com/socratic-ai/cosmo-ai && cd cosmo-ai/examples/swift/Cartographer
 COSMO_API_KEY=cosmo_… ./run.sh --demo
 ```
 
@@ -482,10 +519,9 @@ COSMO_API_KEY=cosmo_… ./run.sh --demo
 
 The SDK ships two test targets:
 
-- **`CosmoRealtimeTests`** — pure unit tests plus the contract-trace suite,
-  which executes the language-neutral protocol traces against `RealtimeSession`
-  over an in-memory fake transport. No network, no LiveKit server. Runs on
-  every `swift test`.
+- **`CosmoRealtimeTests`** — unit tests exercising `RealtimeSession` over an
+  in-memory fake transport. No network, no LiveKit server. Runs on every
+  `swift test`.
 - **`CosmoRealtimeE2ETests`** — exercises the full connect / send / receive /
   disconnect cycle against a real `livekit-server` in dev mode. **Skipped
   unless `LIVEKIT_TESTING_URL` is set.**
@@ -506,4 +542,20 @@ LIVEKIT_TESTING_URL=ws://localhost:7880 \
 
 ## License
 
-Copyright (c) 2025 Socratic Inc. All rights reserved. See [LICENSE](LICENSE).
+Licensed under the [Apache License, Version 2.0](LICENSE). Copyright 2026
+Socratic AI, Inc.
+
+## Export Control
+
+This distribution includes cryptographic software. The country in which you
+currently reside may have restrictions on the import, possession, use, and/or
+re-export to another country of encryption software. Before using any encryption
+software, check your country's laws, regulations, and policies concerning the
+import, possession, use, and re-export of encryption software.
+
+The Cosmo SDK is published by Socratic AI, Inc. as publicly available source
+code. It uses standard TLS/HTTPS and WebRTC (DTLS-SRTP) for transport security
+and does not implement proprietary cryptographic algorithms. By downloading or
+using this software you represent that you are not located in, or a national or
+resident of, any country subject to U.S. embargo or comprehensive sanctions, and
+that you are not on any U.S. government restricted-party list.

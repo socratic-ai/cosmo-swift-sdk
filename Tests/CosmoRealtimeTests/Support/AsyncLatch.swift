@@ -2,9 +2,8 @@ import Foundation
 import Testing
 
 /// A single-shot or counting async latch for deterministic test
-/// synchronization. Tests await `wait()`; production code (or test
-/// handlers) call `signal()`. Avoids fixed sleeps for dispatched
-/// listener tests.
+/// synchronization. Tests await `wait()`; handlers under test call
+/// `signal()`. Avoids fixed sleeps.
 ///
 /// If `wait()` times out before the latch fully signals, it records a
 /// Swift Testing issue so the calling test fails rather than silently

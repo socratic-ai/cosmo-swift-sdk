@@ -32,8 +32,8 @@ public enum RealtimeBaseURL {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard var raw, !raw.isEmpty else { return productionBaseURL }
         // Trailing slashes are dropped so every SDK stores the same origin for
-        // the same backend — and so a prepared session parked under one
-        // spelling still matches a session started under the other.
+        // the same backend — and so a room prepared under one spelling still
+        // matches a session started under the other.
         while raw.hasSuffix("/") { raw.removeLast() }
         guard let url = URL(string: raw) else {
             log.error("\(environmentVariable, privacy: .public) is not a URL: \(raw, privacy: .public)")

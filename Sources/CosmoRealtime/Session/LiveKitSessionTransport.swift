@@ -50,14 +50,6 @@ actor LiveKitSessionTransport: SessionTransport {
     // plus its publication SID. Only one agent voice drives the waveform at a
     // time, so this is a single slot: a new subscription replaces it.
     nonisolated let attachedRemoteTrack = OSAllocatedUnfairLock<(sid: Track.Sid, track: RemoteAudioTrack)?>(initialState: nil)
-    // Every agent-audio track with QoE stats enabled, keyed by publication SID.
-    // Distinct from the single tap slot above: if the agent republishes audio
-    // (new subscribe before the old unsubscribe), both tracks have stats armed
-    // at once, and the old one — no longer the current tap — must still get its
-    // stats disabled on unsubscribe. Correlating cleanup by SID against this set
-    // (not the tap slot) is what stops a stale publication's ~1 Hz stats timer
-    // from outliving its track. Not `private`: a DEBUG test hook reads it.
-    nonisolated let statsEnabledAgentTracks = OSAllocatedUnfairLock<[Track.Sid: RemoteAudioTrack]>(initialState: [:])
     // Software playback gain (0…1) for the agent's audio. Stored so a track
     // attaching later (agent republish, reconnect) inherits it; applied to the
     // currently-subscribed track by ``setAgentPlaybackVolume``. Internal (not
@@ -65,14 +57,10 @@ actor LiveKitSessionTransport: SessionTransport {
     // can assert the clamp without a real LiveKit track.
     nonisolated let desiredAgentVolume = OSAllocatedUnfairLock<Double>(initialState: 1.0)
 
-    // Per-session WebRTC quality. The aggregator is lock-guarded and
-    // ``Sendable`` so the off-actor stats delegate and the read at
-    // ``close()`` share it without hopping the actor. ``statsObserver``
-    // is a ``TrackDelegate`` registered on the mic, agent-audio, and
-    // screen-share tracks; LiveKit holds delegates weakly, so the
-    // transport retains it. Read via ``qoeSnapshot``.
-    nonisolated let qoe = SessionQoEAggregator()
-    private nonisolated let statsObserver: SessionQoEStatsObserver
+    // Connect-phase timings. Lock-guarded and ``Sendable`` so the write
+    // during connect and the read at ``close()`` share it without hopping
+    // the actor. Read via ``connectTimings``.
+    nonisolated let timings = SessionConnectTimingsRecorder()
 
     // Screen-share state lives lock-backed and nonisolated so
     // ``pushScreenShareFrame`` can feed frames from a 60fps capture
@@ -81,6 +69,9 @@ actor LiveKitSessionTransport: SessionTransport {
     nonisolated let screenShareLock = OSAllocatedUnfairLock<ScreenShareState?>(initialState: nil)
     nonisolated let screenShareFrameProcessorLock = OSAllocatedUnfairLock<ScreenShareFrameProcessor?>(initialState: nil)
     nonisolated let screenShareFailedListeners = OSAllocatedUnfairLock<[UUID: @Sendable (Error) -> Void]>(initialState: [:])
+    // Same treatment for the caller-owned audio publish: pushes arrive on an
+    // audio-render thread and must not hop the actor.
+    nonisolated let audioStreamLock = OSAllocatedUnfairLock<AudioStreamState?>(initialState: nil)
     // Set in ``close()`` and checked in the deferred publish so a torn-
     // down room never gets a late publish.
     nonisolated let isClosed = OSAllocatedUnfairLock<Bool>(initialState: false)
@@ -95,10 +86,9 @@ actor LiveKitSessionTransport: SessionTransport {
         self.outputLevels = outStream.stream
         self.outputLevelContinuation = outStream.continuation
         self.outputLevelTap = AudioLevelTap(continuation: outStream.continuation)
-        self.statsObserver = SessionQoEStatsObserver(aggregator: qoe)
     }
 
-    nonisolated var qoeSnapshot: SessionQoESnapshot { qoe.snapshot() }
+    nonisolated var connectTimings: SessionConnectTimings { timings.snapshot() }
 
     func connect(
         configFrame: Data,
@@ -122,13 +112,14 @@ actor LiveKitSessionTransport: SessionTransport {
             )
         }
 
-        // Fast path: a prepared session (room + pre-minted token,
-        // edge-resolved) parked by ``RealtimeSession/prepareSession``. Join
-        // immediately on the held token while ``/session/start`` runs in a
-        // parallel task — the start RTT leaves the join's critical path. The
-        // start carries the prepared-room ref (header middleware) so the
-        // backend dispatches the agent onto the already-created room.
-        let prepared = RealtimeSession._takePreparedSession(baseURL: options.baseURL)
+        // Fast path: a room supplied by an installed ``PreparedRoomProviding``
+        // — already created and edge-resolved. Join immediately on its held
+        // token while ``/session/start`` runs in a parallel task, so the start
+        // RTT leaves the join's critical path. The start carries the room ref
+        // (header middleware) so the backend dispatches the agent onto that
+        // room. With no provider installed there is nothing to take and the
+        // connect is serialized.
+        let prepared = RealtimeSession._takePreparedRoom(for: options)
         let restClient = CosmoRealtimeAPI.Client(
             serverURL: options.baseURL,
             transport: makeRESTTransport(options: options),
@@ -155,7 +146,7 @@ actor LiveKitSessionTransport: SessionTransport {
                 return (session, Date())
             }
         } else {
-            Self.log.notice("connect path=serialized (no prepared session)")
+            Self.log.notice("connect path=serialized (no prepared room)")
             let session = try await Self._callStart(client: restClient, config: config)
             newRoom = makeSessionRoom()
             joinURL = session.livekitUrl
@@ -213,98 +204,76 @@ actor LiveKitSessionTransport: SessionTransport {
 
         let session: CosmoRealtimeAPI.Components.Schemas.RealtimeSessionResponse
         let restDoneAt: Date
+        // Set once the prepared join has been given up on, so the dispatched
+        // room is joined instead.
+        var preparedJoinAbandoned = false
         do {
             (session, restDoneAt) = try await startTask.value
         } catch {
-            Self.log.error(
-                "session start failed: \(error.localizedDescription, privacy: .public)"
+            _abandonJoin(
+                room: newRoom, delegate: delegate,
+                continuation: frameStream.continuation, joinTask: joinTask
             )
-            // Abandon the in-flight join off the press path: detach the
-            // delegate first so its teardown can't fire ``onClosed``, then
-            // let the join settle (cancel is cooperative; LiveKit may run to
-            // its own timeout) and disconnect whatever it established.
-            newRoom.delegates.remove(delegate: delegate)
-            frameStream.continuation.finish()
-            joinTask.cancel()
-            Task { [newRoom] in
-                if case .failure(let joinError) = await joinTask.result {
-                    Self.log.info(
-                        "abandoned join settled with error: \(joinError.localizedDescription, privacy: .public)"
-                    )
-                }
-                await newRoom.disconnect()
+            guard prepared != nil, Self._isPreparedRoomRefusal(error) else {
+                Self.log.error(
+                    "session start failed: \(error.localizedDescription, privacy: .public)"
+                )
+                throw error
             }
-            throw error
+            // The backend refused the room ref — its grant is bound to the
+            // user and workspace that prepared it, so a credential change the
+            // provider didn't catch, or a server-side key rotation, lands
+            // here. Retry the start without the ref rather than failing a
+            // connect the serialized path would have completed.
+            Self.log.warning("prepared room refused at session start — retrying without it")
+            session = try await Self._callStart(
+                client: CosmoRealtimeAPI.Client(
+                    serverURL: options.baseURL,
+                    transport: makeRESTTransport(options: options),
+                    middlewares: options._apiMiddlewares(prepared: nil)
+                ),
+                config: config
+            )
+            restDoneAt = Date()
+            preparedJoinAbandoned = true
         }
         if let t = session.timings {
-            qoe.setServerTimings(Self.serverTimings(from: t))
+            timings.setServerTimings(t)
         }
-        // Cache the URL this join used so the next ``prewarmConnection`` warms
-        // the right Cloud edge's TLS. Per-env stable, so it stays valid until
-        // the env changes.
-        PrewarmCache.storeLastLiveKitURL(session.livekitUrl)
 
-        // Version-skew fallback: a backend that doesn't read the
-        // prepared-room headers dispatched the agent onto a fresh room. The
-        // response's ``roomName`` is authoritative — abandon the still-in-
-        // flight prepared join WITHOUT waiting for it (detach its delegate
-        // first, so its teardown can't fire ``onClosed`` for a room this
-        // session never used) and join the dispatched one on the response
-        // token. The skew connect then costs REST + one join, same as the
-        // serialized path.
+        // Version-skew fallback: a backend that doesn't read the room-ref
+        // headers dispatched the agent onto a fresh room. The response's
+        // ``roomName`` is authoritative — give up on the still-in-flight
+        // prepared join and take the dispatched room instead. The skew connect
+        // then costs REST + one join, same as the serialized path.
+        if let prepared, !preparedJoinAbandoned, session.roomName != prepared.roomName {
+            Self.log.warning(
+                "prepared room not honored by backend (prepared=\(prepared.roomName, privacy: .public) dispatched=\(session.roomName, privacy: .public)) — abandoning the prepared join, joining the dispatched room"
+            )
+            _abandonJoin(
+                room: newRoom, delegate: delegate,
+                continuation: frameStream.continuation, joinTask: joinTask
+            )
+            preparedJoinAbandoned = true
+        }
+
         let activeRoom: Room
         let activeDelegate: SessionRoomDelegate
         let activeStream: (stream: AsyncStream<Data>, continuation: AsyncStream<Data>.Continuation)
         let roomConnectedAt: Date
-        if let prepared, session.roomName != prepared.roomName {
-            Self.log.warning(
-                "prepared room not honored by backend (prepared=\(prepared.roomName, privacy: .public) dispatched=\(session.roomName, privacy: .public)) — abandoning the prepared join, joining the dispatched room"
-            )
-            newRoom.delegates.remove(delegate: delegate)
-            frameStream.continuation.finish()
-            joinTask.cancel()
-            Task { [newRoom] in
-                if case .failure(let joinError) = await joinTask.result {
-                    Self.log.info(
-                        "abandoned prepared join settled with error: \(joinError.localizedDescription, privacy: .public)"
-                    )
-                }
-                await newRoom.disconnect()
-            }
-            let freshRoom = makeSessionRoom()
-            let freshStream = AsyncStream<Data>.makeStream(bufferingPolicy: .unbounded)
-            let freshDelegate = SessionRoomDelegate(
-                frames: freshStream.continuation,
+        if preparedJoinAbandoned {
+            let joined = try await _joinDispatchedRoom(
+                session: session,
                 callbacks: callbacks,
-                transport: self
+                clientToolHandlers: clientToolHandlers,
+                backgroundClientToolHandlers: backgroundClientToolHandlers,
+                clientToolJobSink: clientToolJobSink,
+                hooks: hooks,
+                micMuted: micMuted
             )
-            freshRoom.delegates.add(delegate: freshDelegate)
-            do {
-                // Same pre-join binding as the primary room — the dispatched
-                // room's agent is already live, so the join window is real.
-                try await Self.bindClientTools(
-                    on: freshRoom,
-                    clientToolHandlers: clientToolHandlers,
-                    backgroundClientToolHandlers: backgroundClientToolHandlers,
-                    clientToolJobSink: clientToolJobSink,
-                    hooks: hooks,
-                    sessionId: { session.sessionId }
-                )
-            } catch {
-                freshStream.continuation.finish()
-                throw SessionStartFailure.transport(message: error.localizedDescription)
-            }
-            do {
-                try await _joinRoom(
-                    freshRoom, url: session.livekitUrl, token: session.token, micMuted: micMuted
-                )
-            } catch {
-                freshStream.continuation.finish()
-                throw error
-            }
-            activeRoom = freshRoom
-            activeDelegate = freshDelegate
-            activeStream = freshStream
+            activeRoom = joined.room
+            activeDelegate = joined.delegate
+            activeStream = joined.stream
             roomConnectedAt = Date()
         } else {
             do {
@@ -329,8 +298,8 @@ actor LiveKitSessionTransport: SessionTransport {
         if micMuted {
             // Privacy: no mic track is published during the connect window.
             // It first publishes on ``setMicrophoneEnabled(true)``, which
-            // attaches the input tap + QoE stats then — so there is no
-            // publish phase here.
+            // attaches the input tap then — so there is no publish phase
+            // here.
             micMs = 0
         } else {
             let micPublishStart = Date()
@@ -354,18 +323,17 @@ actor LiveKitSessionTransport: SessionTransport {
         // undercounted by pinning total to the room-connect instant.
         let connectReadyAt = Date()
 
-        // Phase breakdown: ``ws`` is the REST session-start, ``room`` the
-        // LiveKit join, ``mic`` the mic-publish duration (0 for a muted join,
-        // which publishes nothing here), ``total`` the whole connect through
-        // connect-ready. Joined with ``serverTimings`` so each connect
-        // millisecond is attributable to client, network, or server. On the
-        // prepared fast path ``ws`` and ``room`` overlap (parallel start), so
-        // they no longer sum to ``total``.
-        qoe.setConnectPhases(
-            wsMs: restDoneAt.timeIntervalSince(handshakeStart) * 1000,
-            roomMs: roomConnectedAt.timeIntervalSince(joinStartedAt) * 1000,
-            micMs: micMs,
-            totalMs: connectReadyAt.timeIntervalSince(handshakeStart) * 1000
+        let phases = Self.connectPhases(
+            handshakeStart: handshakeStart,
+            restDoneAt: restDoneAt,
+            joinStartedAt: joinStartedAt,
+            roomConnectedAt: roomConnectedAt,
+            connectReadyAt: connectReadyAt,
+            micMs: micMs
+        )
+        timings.setConnectPhases(
+            wsMs: phases.wsMs, roomMs: phases.roomMs,
+            micMs: phases.micMs, totalMs: phases.totalMs
         )
 
         self.room = activeRoom
@@ -381,7 +349,93 @@ actor LiveKitSessionTransport: SessionTransport {
             }
         }
         Self.log.info("transport connected sessionId=\(session.sessionId, privacy: .public)")
-        return SessionStartInfo(sessionId: session.sessionId)
+        return SessionStartInfo(response: session)
+    }
+
+    /// Give up on an in-flight join without waiting for it: detach the
+    /// delegate first so its teardown can't fire ``onClosed`` for a room this
+    /// session never used, then let the join settle off the caller's path
+    /// (cancel is cooperative; LiveKit may run to its own timeout) and
+    /// disconnect whatever it established.
+    private func _abandonJoin(
+        room: Room,
+        delegate: SessionRoomDelegate,
+        continuation: AsyncStream<Data>.Continuation,
+        joinTask: Task<Void, Error>
+    ) {
+        room.delegates.remove(delegate: delegate)
+        continuation.finish()
+        joinTask.cancel()
+        Task { [room] in
+            if case .failure(let joinError) = await joinTask.result {
+                Self.log.info(
+                    "abandoned join settled with error: \(joinError.localizedDescription, privacy: .public)"
+                )
+            }
+            await room.disconnect()
+        }
+    }
+
+    /// Join the room the backend actually dispatched, on the response's own
+    /// token. The path taken whenever a prepared room could not be used —
+    /// refused at start, or not honored.
+    private func _joinDispatchedRoom(
+        session: CosmoRealtimeAPI.Components.Schemas.RealtimeSessionResponse,
+        callbacks: SessionTransportCallbacks,
+        clientToolHandlers: [String: ClientToolHandler],
+        backgroundClientToolHandlers: [String: BackgroundClientToolHandler],
+        clientToolJobSink: ClientToolJobSink?,
+        hooks: HookEngine?,
+        micMuted: Bool
+    ) async throws -> (
+        room: Room,
+        delegate: SessionRoomDelegate,
+        stream: (stream: AsyncStream<Data>, continuation: AsyncStream<Data>.Continuation)
+    ) {
+        let room = makeSessionRoom()
+        let stream = AsyncStream<Data>.makeStream(bufferingPolicy: .unbounded)
+        let delegate = SessionRoomDelegate(
+            frames: stream.continuation, callbacks: callbacks, transport: self
+        )
+        room.delegates.add(delegate: delegate)
+        do {
+            // Same pre-join binding as the primary room — the dispatched
+            // room's agent is already live, so the join window is real.
+            try await Self.bindClientTools(
+                on: room,
+                clientToolHandlers: clientToolHandlers,
+                backgroundClientToolHandlers: backgroundClientToolHandlers,
+                clientToolJobSink: clientToolJobSink,
+                hooks: hooks,
+                sessionId: { session.sessionId }
+            )
+        } catch {
+            stream.continuation.finish()
+            throw SessionStartFailure.transport(message: error.localizedDescription)
+        }
+        do {
+            try await _joinRoom(
+                room, url: session.livekitUrl, token: session.token, micMuted: micMuted
+            )
+        } catch {
+            stream.continuation.finish()
+            throw error
+        }
+        return (room, delegate, stream)
+    }
+
+    /// A start refused because of the room ref it carried. The backend answers
+    /// a grant it won't honor with a plain `{"detail": …}` 403, which the
+    /// generated client surfaces as an undocumented status rather than the
+    /// error envelope. Only consulted when a room ref was actually sent, so a
+    /// 403 from anywhere else in the auth stack still surfaces to the caller —
+    /// via the retry, which reproduces it without the ref.
+    private static func _isPreparedRoomRefusal(_ error: any Error) -> Bool {
+        guard
+            let failure = error as? SessionStartFailure,
+            case .rejected(let status, _, _) = failure
+        else { return false }
+        return status == 403
     }
 
     /// Join ``room``, publishing the mic during the join so the publisher
@@ -420,9 +474,8 @@ actor LiveKitSessionTransport: SessionTransport {
 
     func send(frame: Data) async throws {
         guard let room else { throw RealtimeSessionError.notConnected }
-        // Same DTLS-handshake-race retry as the legacy client's
-        // ``_publishOnce``: only the literal "Data channel is not open"
-        // retries, with 50ms-doubling backoff.
+        // Retry over the DTLS-handshake race: only the literal
+        // "Data channel is not open" retries, with 50ms-doubling backoff.
         let maxAttempts = 5
         var lastError: Error?
         for attempt in 0..<maxAttempts {
@@ -469,8 +522,8 @@ actor LiveKitSessionTransport: SessionTransport {
         do {
             let publication = try await room.localParticipant.setMicrophone(enabled: enabled)
             // A session that joined muted (``micMuted``) publishes its mic here
-            // for the first time; attach the input tap + QoE stats so the
-            // waveform and outbound RTT light up once audio flows.
+            // for the first time; attach the input tap so the waveform lights
+            // up once audio flows.
             if enabled, let micTrack = publication?.track as? LocalAudioTrack {
                 await attachMicInstrumentation(to: micTrack)
             }
@@ -483,17 +536,15 @@ actor LiveKitSessionTransport: SessionTransport {
         }
     }
 
-    /// Wire a freshly-published local mic track into the input-level tap and
-    /// turn on its ~1 Hz QoE stats, so the waveform and outbound RTT light up
-    /// once audio flows. Shared by the connect-time publish and the first
-    /// ``setMicrophoneEnabled(true)`` of a muted join. The agent-audio tap and
-    /// its stats are attached separately by the delegate once that track is
-    /// subscribed (it may not exist yet at connect time). Idempotent on a
-    /// re-enable — ``attachInputLevelTap`` swaps the renderer off any prior
-    /// track.
+    /// Wire a freshly-published local mic track into the input-level tap so
+    /// the waveform lights up once audio flows. Shared by the connect-time
+    /// publish and the first ``setMicrophoneEnabled(true)`` of a muted join.
+    /// The agent-audio tap is attached separately by the delegate once that
+    /// track is subscribed (it may not exist yet at connect time). Idempotent
+    /// on a re-enable — ``attachInputLevelTap`` swaps the renderer off any
+    /// prior track.
     private func attachMicInstrumentation(to track: LocalAudioTrack) async {
         attachInputLevelTap(to: track)
-        await enableQoEStats(on: track)
     }
 
     func close() async {
@@ -509,6 +560,7 @@ actor LiveKitSessionTransport: SessionTransport {
             state?.publishTask?.cancel()
             state = nil
         }
+        stopAudioStreamSlot()
         if let room {
             await room.disconnect()
         }
@@ -520,9 +572,8 @@ actor LiveKitSessionTransport: SessionTransport {
     //
     // The taps are LiveKit ``AudioRenderer``s: added to a track, LiveKit
     // drives ``render`` off its audio render callback (no timer here), and
-    // ``AudioLevelTap`` self-throttles emits to ~30 Hz. Attach mirrors the
-    // legacy client's tap lifecycle; detach happens on track teardown and
-    // at ``close()``.
+    // ``AudioLevelTap`` self-throttles emits to ~30 Hz. Detach happens on
+    // track teardown and at ``close()``.
 
     nonisolated func attachInputLevelTap(to track: LocalAudioTrack) {
         // Drop the renderer from any prior track before attaching, so a
@@ -548,13 +599,8 @@ actor LiveKitSessionTransport: SessionTransport {
         }
     }
 
-    /// Register a newly-subscribed agent-audio track: record it for QoE-stats
-    /// cleanup (keyed by publication SID) and make it the current output tap.
-    /// The two are tracked separately so an overlapping republish — new track
-    /// subscribed before the old one unsubscribes — still disables the old
-    /// track's stats on its (later) unsubscribe even though the tap has moved on.
+    /// Make a newly-subscribed agent-audio track the current output tap.
     nonisolated func beginAgentAudio(track: RemoteAudioTrack, sid: Track.Sid) {
-        statsEnabledAgentTracks.withLock { $0[sid] = track }
         attachOutputLevelTap(to: track, sid: sid)
     }
 
@@ -588,12 +634,8 @@ actor LiveKitSessionTransport: SessionTransport {
         attachedRemoteTrack.withLock { $0 }?.track.volume = clamped
     }
 
-    /// Unconditional detach (used at ``close()``). Also drops the stats-enabled
-    /// set — ``room.disconnect()`` cancels every track's stats timer, so there
-    /// is nothing left to disable per-track, and holding the refs would just
-    /// outlive the session.
+    /// Unconditional detach (used at ``close()``).
     nonisolated func detachOutputLevelTap() {
-        statsEnabledAgentTracks.withLock { $0.removeAll() }
         if let track = attachedRemoteTrack.withLock({ current -> RemoteAudioTrack? in
             let t = current?.track
             current = nil
@@ -603,109 +645,43 @@ actor LiveKitSessionTransport: SessionTransport {
         }
     }
 
-    /// Resolve an agent-audio unsubscribe of ``sid``: drop it from the
-    /// stats-enabled set and return its track so the caller can disable its QoE
-    /// stats, AND detach the output tap iff this SID is the current one.
-    ///
-    /// Keyed on publication SID, not ``publication.track``: LiveKit nils that
-    /// before it notifies unsubscribe on the ``didRemoveTrack`` /
-    /// ``set(subscribed:)`` paths, so reading it there would skip cleanup. And
-    /// keyed on the per-publication set, not the single tap slot, so a stale
-    /// publication (agent republished, tap already moved to the new track)
-    /// still gets its stats disabled. Returns nil only if this SID was never a
-    /// stats-enabled agent track.
-    nonisolated func endAgentAudio(publicationSID sid: Track.Sid) -> RemoteAudioTrack? {
-        let track = statsEnabledAgentTracks.withLock { $0.removeValue(forKey: sid) }
-        // Detach the renderer only if this SID owns the current tap; an
-        // overlapping republish already swapped it off in ``attachOutputLevelTap``.
+    /// Resolve an agent-audio unsubscribe of ``sid``: detach the output tap
+    /// iff this SID owns it. Keyed on publication SID, not
+    /// ``publication.track`` — LiveKit nils that before it notifies unsubscribe
+    /// on the ``didRemoveTrack`` / ``set(subscribed:)`` paths, so reading it
+    /// there would skip cleanup. An overlapping republish already swapped the
+    /// tap off in ``attachOutputLevelTap``, so a stale SID is a no-op.
+    nonisolated func endAgentAudio(publicationSID sid: Track.Sid) {
         let tappedTrack = attachedRemoteTrack.withLock { current -> RemoteAudioTrack? in
             guard let c = current, c.sid == sid else { return nil }
             current = nil
             return c.track
         }
         tappedTrack?.remove(audioRenderer: outputLevelTap)
-        return track
     }
 
-    // MARK: QoE stats
-    //
-    // ``reportStatistics`` turns on LiveKit's ~1 Hz per-track stats timer
-    // and registers ``statsObserver`` as a ``TrackDelegate`` so
-    // ``didUpdateStatistics`` folds into ``qoe``. Enabled per track — mic,
-    // agent audio, screen-share — mirroring the legacy client.
-    // ``reportStatistics`` also drives LiveKit's own server-side analytics, so
-    // enabling QoE collection is not purely local.
-    //
-    // The timer is NOT bound to a track's *publish* lifetime. LiveKit cancels it
-    // only on room disconnect (``Room.cancelTimers``) — never on ``unpublish``,
-    // which drops the RTP sender from the peer connection but leaves both the
-    // timer and the track's ``rtpSender`` in place. Any track unpublished
-    // mid-call must therefore be turned off explicitly (``disableQoEStats``), or
-    // the next tick asks the peer connection for stats on a sender it no longer
-    // owns and WebRTC aborts the process. Screen share is the only track that
-    // comes and goes mid-call; the rest live until ``close()`` disconnects.
-
-    func enableQoEStats(on track: Track) async {
-        track.add(delegate: statsObserver)
-        await track.set(reportStatistics: true)
-    }
-
-    /// True iff enabling QoE stats for agent-audio publication ``sid`` is still
-    /// valid: the session is open AND the publication is still stats-tracked.
-    /// The enable is enqueued off the ``didSubscribeTrack`` delegate and can
-    /// land after ``close()`` (which sets ``isClosed`` and clears the set
-    /// outside the enqueue chain) or after the publication already unsubscribed
-    /// (``endAgentAudio`` drops it synchronously). Either way, re-arming the
-    /// ~1 Hz stats timer on a gone/disconnected track is exactly the leak this
-    /// path prevents, so skip it.
-    nonisolated func shouldEnableAgentAudioStats(sid: Track.Sid) -> Bool {
-        !isClosed.withLock { $0 } && statsEnabledAgentTracks.withLock { $0[sid] != nil }
-    }
-
-    /// Enable QoE stats for a just-subscribed agent-audio track, guarded so a
-    /// queued enable can't re-arm the timer after close/unsubscribe.
-    func enableAgentAudioStatsIfCurrent(_ track: RemoteAudioTrack, sid: Track.Sid) async {
-        guard shouldEnableAgentAudioStats(sid: sid) else { return }
-        await enableQoEStats(on: track)
-    }
-
-    func disableQoEStats(on track: Track) async {
-        await track.set(reportStatistics: false)
-        track.remove(delegate: statsObserver)
-    }
-
-    /// Map LiveKit's per-participant connection-quality update into the
-    /// aggregator. ``nonisolated`` so the room delegate can fold it in
-    /// from LiveKit's off-actor queue without hopping the actor.
-    nonisolated func recordConnectionQuality(_ quality: LiveKit.ConnectionQuality) {
-        qoe.record(quality: Self.mapConnectionQuality(quality))
-    }
-
-    static func mapConnectionQuality(_ quality: LiveKit.ConnectionQuality) -> RealtimeConnectionQuality {
-        switch quality {
-        case .unknown: return .unknown
-        case .lost: return .lost
-        case .poor: return .poor
-        case .good: return .good
-        case .excellent: return .excellent
-        @unknown default: return .unknown
-        }
-    }
-
-    /// Map the start response's server-side phase breakdown onto the
-    /// neutral QoE type. The wire fields are non-optional integers.
-    static func serverTimings(
-        from t: CosmoRealtimeAPI.Components.Schemas.RealtimeSessionStartTimings
-    ) -> SessionStartServerTimings {
-        SessionStartServerTimings(
-            versionCheckMs: Int(t.versionCheckMs),
-            projectCheckMs: Int(t.projectCheckMs),
-            providerResolveMs: Int(t.providerResolveMs),
-            dbInsertMs: Int(t.dbInsertMs),
-            mintTokensMs: Int(t.mintTokensMs),
-            dispatchMs: Int(t.dispatchMs),
-            totalMs: Int(t.totalMs),
-            resolveMs: t.resolveMs.map { Int($0) }
+    /// Phase breakdown of one connect: ``ws`` is the REST session-start,
+    /// ``room`` the LiveKit join, ``mic`` the mic-publish duration (0 for a
+    /// muted join, which publishes nothing), ``total`` the whole connect
+    /// through connect-ready.
+    ///
+    /// The phases do NOT necessarily sum to ``total``. On the prepared-room
+    /// fast path the REST start runs concurrently with the join, so
+    /// ``joinStartedAt`` precedes ``restDoneAt`` and the ws/room windows
+    /// overlap. Pure so that property is testable without a server.
+    static func connectPhases(
+        handshakeStart: Date,
+        restDoneAt: Date,
+        joinStartedAt: Date,
+        roomConnectedAt: Date,
+        connectReadyAt: Date,
+        micMs: Double
+    ) -> (wsMs: Double, roomMs: Double, micMs: Double, totalMs: Double) {
+        (
+            wsMs: restDoneAt.timeIntervalSince(handshakeStart) * 1000,
+            roomMs: roomConnectedAt.timeIntervalSince(joinStartedAt) * 1000,
+            micMs: micMs,
+            totalMs: connectReadyAt.timeIntervalSince(handshakeStart) * 1000
         )
     }
 
@@ -740,6 +716,18 @@ actor LiveKitSessionTransport: SessionTransport {
         }
     }
 
+    /// A ``MintTokenError`` raised while resolving the credential travels
+    /// through the generated client wrapped in a ``ClientError``; recover
+    /// it so the token-source failure (and its slug) survives to the caller.
+    static func _mintTokenError(in error: any Error) -> MintTokenError? {
+        if let mintError = error as? MintTokenError { return mintError }
+        if let clientError = error as? ClientError,
+           let mintError = clientError.underlyingError as? MintTokenError {
+            return mintError
+        }
+        return nil
+    }
+
     /// POST ``/session/start`` and decode the response. Static
     /// (captures only the Sendable ``Client``) so the prepared fast path can
     /// run it in a parallel task while the room join proceeds.
@@ -751,6 +739,9 @@ actor LiveKitSessionTransport: SessionTransport {
         do {
             output = try await client.startRealtimeSession(body: .json(config))
         } catch {
+            if let mintError = _mintTokenError(in: error) {
+                throw SessionStartFailure.credential(mintError)
+            }
             throw SessionStartFailure.transport(message: error.localizedDescription)
         }
         switch output {
@@ -762,6 +753,12 @@ actor LiveKitSessionTransport: SessionTransport {
                     message: "session-start response decode failed: \(error.localizedDescription)"
                 )
             }
+        case .unauthorized(let err):
+            // Auth-layer 401: the body is ``{"detail": "..."}`` — never the
+            // error envelope — so there is no rejection code to parse.
+            throw SessionStartFailure.rejected(
+                status: 401, code: nil, detail: (try? err.body.json.detail) ?? "Unauthorized"
+            )
         case .unprocessableContent(let err):
             guard let envelope = try? err.body.json else {
                 throw SessionStartFailure.rejected(
@@ -787,8 +784,7 @@ actor LiveKitSessionTransport: SessionTransport {
 /// Minimal ``RoomDelegate`` for the session transport: forwards data
 /// packets (in arrival order, via the frame stream) and maps transport
 /// lifecycle onto the session callbacks. Lifecycle callbacks are
-/// chained FIFO like the legacy ``RealtimeRoomDelegate`` so LiveKit's
-/// multi-queue delivery can't reorder them.
+/// chained FIFO so LiveKit's multi-queue delivery can't reorder them.
 final class SessionRoomDelegate: RoomDelegate, @unchecked Sendable {
 
     private let frames: AsyncStream<Data>.Continuation
@@ -893,9 +889,7 @@ final class SessionRoomDelegate: RoomDelegate, @unchecked Sendable {
     // Agent audio track lifecycle drives the ``outputLevels`` tap: attach
     // once the remote agent's audio track is subscribed, detach when it
     // goes away. Tap calls are synchronous lock-only operations on the
-    // transport, so they run inline; enabling that track's QoE stats is
-    // ``async`` (it awaits ``track.set(reportStatistics:)``), so it hops
-    // the actor through ``enqueue``.
+    // transport, so they run inline.
     func room(_ room: Room, participant: RemoteParticipant, didSubscribeTrack publication: RemoteTrackPublication) {
         guard participant.isAgent, let track = publication.track as? RemoteAudioTrack else { return }
         let sid = publication.sid
@@ -913,28 +907,13 @@ final class SessionRoomDelegate: RoomDelegate, @unchecked Sendable {
         if firstAgentTrack {
             enqueue { [callbacks] in await callbacks.onAgentLive() }
         }
-        // Guarded: this enable is queued, so close() or an unsubscribe can land
-        // first — re-check before arming the timer (see shouldEnableAgentAudioStats).
-        enqueue { [weak transport] in await transport?.enableAgentAudioStatsIfCurrent(track, sid: sid) }
     }
 
     func room(_ room: Room, participant: RemoteParticipant, didUnsubscribeTrack publication: RemoteTrackPublication) {
-        // Resolve the agent-audio track by publication SID against the
-        // stats-enabled set, NOT ``publication.track`` (LiveKit nils that before
-        // notifying on the ``didRemoveTrack`` / ``set(subscribed:)`` paths) and
-        // NOT the single tap slot (an overlapping republish may have moved it to
-        // a newer track). Returns nil (no-op) for any non-agent-audio unsubscribe.
-        guard let track = transport?.endAgentAudio(publicationSID: publication.sid) else { return }
-        // Disable the QoE stats armed on subscribe (LiveKit's ~1 Hz per-track
-        // timer) so it doesn't outlive the track it measures — LiveKit cancels
-        // it only on room disconnect. Energy rule: no timer outlives its work.
-        // The sender-side twin of leaving it armed is a documented crash; the
-        // receiver-side abort is unconfirmed, but the timer has no reason to run.
-        enqueue { [weak transport] in await transport?.disableQoEStats(on: track) }
-    }
-
-    func room(_ room: Room, participant: Participant, didUpdateConnectionQuality quality: ConnectionQuality) {
-        transport?.recordConnectionQuality(quality)
+        // Keyed on publication SID, not ``publication.track`` — LiveKit nils
+        // that before notifying on the ``didRemoveTrack`` /
+        // ``set(subscribed:)`` paths. A non-agent-audio unsubscribe is a no-op.
+        transport?.endAgentAudio(publicationSID: publication.sid)
     }
 }
 
@@ -942,7 +921,7 @@ final class SessionRoomDelegate: RoomDelegate, @unchecked Sendable {
 /// server-side closes map to ``RealtimeSession/EndReason/serverEnded(reason:)``;
 /// everything else — including ``serverShutdown``, infrastructure failure from
 /// the caller's perspective — stays ``transportError``. Same mapping as the
-/// sibling SDKs, with one platform gap: client-sdk-swift 2.14.1 has no error
+/// sibling SDKs, with one platform gap: client-sdk-swift has no error
 /// type for proto ``ROOM_CLOSED`` (it arrives as ``.unknown``), so that reason
 /// remains a transport error here.
 func endReason(

@@ -5,14 +5,36 @@ import Foundation
 /// bound its replies against the values the transport enforces instead of
 /// copying them.
 public enum ClientToolReply {
-    /// Ceiling on one serialized reply envelope. The transport truncates
-    /// error text to fit and fails an oversized success result closed as an
-    /// error reply.
+    /// Ceiling on one serialized reply envelope. The transport shortens a
+    /// reply that would exceed it — error text, an ack note, or a success
+    /// result — rather than dropping it.
     public static let maxBytes = 15 * 1024
 
+    /// Terminates every string the transport shortened to fit ``maxBytes``.
+    public static let truncationSuffix = "… [truncated]"
+
+    /// Added to the top-level result object of a success reply the transport
+    /// had to shorten. Its value is `{note, kept_bytes, original_bytes}` —
+    /// ``truncationMarkerNote`` plus the serialized size of the result that
+    /// shipped and of the one the handler returned. Under the
+    /// ``SessionConfig/sdkToolNamePrefix`` namespace, so it cannot collide
+    /// with a key of the caller's own.
+    public static let truncationMarkerKey = "cosmo_sdk_truncated"
+
+    /// The instruction the model reads when a result was shortened. Phrased
+    /// as a directive rather than a description, and it names no recovery
+    /// mechanism a given tool might not have — a tool that takes no arguments
+    /// cannot be asked a narrower question, so the always-available fallback
+    /// is to say what is missing.
+    public static let truncationMarkerNote =
+        "partial result — do not answer as if it were complete; "
+        + "narrow the request or say what is missing."
+
     /// The `{ok, result, error}` envelope, serialized to JSON. Does not
-    /// itself enforce ``maxBytes``: callers that can produce large results
-    /// must bound the payload first.
+    /// itself enforce ``maxBytes``; the dispatcher does, on the way out. A
+    /// tool pack that can shorten its own payload meaningfully — dropping
+    /// whole hits, keeping the tail of a log — should still do so, because
+    /// the generic shortening cannot know which bytes mattered.
     public static func envelope(
         ok: Bool, result: [String: JSONValue]? = nil, error: String? = nil
     ) -> String {

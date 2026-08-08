@@ -15,13 +15,11 @@
           "caller_number": {
             "description": "E.164 caller-ID to present, e.g. +14155550100. Must be an ACTIVE number in the workspace's pool (rejected with 400 caller_number_not_available otherwise). Omit to use the trunk default.",
             "maxLength": 20,
-            "title": "Caller Number",
             "type": "string"
           },
           "phone_number": {
             "description": "E.164 destination to call, e.g. +14155550199.",
             "maxLength": 20,
-            "title": "Phone Number",
             "type": "string"
           }
         },
@@ -36,7 +34,6 @@
         "properties": {
           "dial_id": {
             "format": "uuid",
-            "title": "Dial Id",
             "type": "string"
           }
         },
@@ -62,8 +59,14 @@
             "maxLength": 128,
             "minLength": 1,
             "pattern": "^[A-Za-z0-9._+@-]+$",
-            "title": "External User Id",
             "type": "string"
+          },
+          "ttl_seconds": {
+            "default": 86400,
+            "description": "Token lifetime in seconds \u2014 between 60 and 86400 (24 hours, the default). Shorten it for tokens handed to short-lived contexts.",
+            "maximum": 86400.0,
+            "minimum": 60.0,
+            "type": "integer"
           }
         },
         "required": [
@@ -76,17 +79,20 @@
         "properties": {
           "expires_at": {
             "format": "date-time",
-            "title": "Expires At",
             "type": "string"
           },
           "jwt": {
-            "title": "Jwt",
+            "type": "string"
+          },
+          "token_id": {
+            "description": "Server-side id of this minted token; pass it to DELETE /api/v1/external/auth/token/{token_id} to revoke early.",
             "type": "string"
           }
         },
         "required": [
           "jwt",
-          "expires_at"
+          "expires_at",
+          "token_id"
         ],
         "title": "MintTokenResponse",
         "type": "object"
@@ -99,7 +105,6 @@
             "default": -15.0,
             "maximum": 0.0,
             "minimum": -60.0,
-            "title": "Gain Db",
             "type": "number"
           },
           "track": {
@@ -117,13 +122,11 @@
             "$ref": "#/components/schemas/RealtimeAmbienceConfig"
           },
           "noise_cancellation": {
-            "default": true,
-            "title": "Noise Cancellation",
+            "default": false,
             "type": "boolean"
           },
           "output": {
             "default": true,
-            "title": "Output",
             "type": "boolean"
           }
         },
@@ -136,7 +139,6 @@
           "type": {
             "const": "bot-llm-started",
             "default": "bot-llm-started",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -151,7 +153,6 @@
           "type": {
             "const": "bot-llm-stopped",
             "default": "bot-llm-stopped",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -167,7 +168,6 @@
           "type": {
             "const": "bot-started-speaking",
             "default": "bot-started-speaking",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -182,7 +182,6 @@
           "type": {
             "const": "bot-stopped-speaking",
             "default": "bot-stopped-speaking",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -198,7 +197,6 @@
           "type": {
             "const": "bot-tts-started",
             "default": "bot-tts-started",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -213,7 +211,6 @@
           "type": {
             "const": "bot-tts-stopped",
             "default": "bot-tts-stopped",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -231,13 +228,11 @@
             "additionalProperties": {
               "type": "string"
             },
-            "title": "Inputs",
             "type": "object"
           },
           "name": {
             "maxLength": 100,
             "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$",
-            "title": "Name",
             "type": "string"
           },
           "tools": {
@@ -247,6 +242,7 @@
                   "catalog": "#/components/schemas/RealtimeCatalogToolSpec",
                   "client": "#/components/schemas/RealtimeClientToolSpec",
                   "detect_objects": "#/components/schemas/RealtimeDetectObjectsToolSpec",
+                  "end_call": "#/components/schemas/RealtimeEndCallToolSpec",
                   "examine_image": "#/components/schemas/RealtimeExamineImageToolSpec",
                   "point_at_object": "#/components/schemas/RealtimePointAtObjectToolSpec",
                   "screen_locate": "#/components/schemas/RealtimeScreenLocateToolSpec",
@@ -279,17 +275,18 @@
                 },
                 {
                   "$ref": "#/components/schemas/RealtimeScreenLocateToolSpec"
+                },
+                {
+                  "$ref": "#/components/schemas/RealtimeEndCallToolSpec"
                 }
               ]
             },
             "maxItems": 10000,
-            "title": "Tools",
             "type": "array"
           },
           "type": {
             "const": "catalog",
             "default": "catalog",
-            "title": "Type",
             "type": "string"
           },
           "voice": {
@@ -310,12 +307,10 @@
           "kind": {
             "const": "catalog",
             "default": "catalog",
-            "title": "Kind",
             "type": "string"
           },
           "name": {
             "maxLength": 100,
-            "title": "Name",
             "type": "string"
           }
         },
@@ -332,7 +327,6 @@
           "type": {
             "const": "activity-end",
             "default": "activity-end",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -348,7 +342,6 @@
           "type": {
             "const": "bind-input",
             "default": "bind-input",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -364,13 +357,11 @@
           "content": {
             "maxLength": 4096,
             "minLength": 1,
-            "title": "Content",
             "type": "string"
           },
           "type": {
             "const": "send-context",
             "default": "send-context",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -387,7 +378,6 @@
           "type": {
             "const": "end",
             "default": "end",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -401,25 +391,20 @@
         "description": "Generic chunked carrier for any oversized client message.\n\nThe SDK auto-wraps any outbound message whose JSON exceeds the\ntransport's per-packet threshold into a sequence of envelope chunks; the\nserver buffers by ``envelope_id``, concatenates the base64-encoded UTF-8\nbytes back into the original JSON, and re-runs classification.\n\n``data`` is a base64-encoded fragment of the UTF-8 bytes of the inner\nmessage JSON. Base64 keeps every chunk ASCII-safe \u2014 splitting at byte\nboundaries can land mid-codepoint in a raw UTF-8 substring, which would\ncorrupt the decode on the server.\n\nOrdering is guaranteed by the reliable channel (chunks arrive in ``seq``\norder); ``envelope_id`` keeps concurrent envelopes from interleaving.\n``seq`` runs ``0..total-1`` and the assembler emits the reassembled\ninner message as soon as the last chunk arrives.",
         "properties": {
           "data": {
-            "title": "Data",
             "type": "string"
           },
           "envelope_id": {
-            "title": "Envelope Id",
             "type": "string"
           },
           "seq": {
-            "title": "Seq",
             "type": "integer"
           },
           "total": {
-            "title": "Total",
             "type": "integer"
           },
           "type": {
             "const": "envelope-chunk",
             "default": "envelope-chunk",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -437,23 +422,19 @@
         "description": "One image frame from the client \u2014 screen share, camera capture, or\nany other visual input the application wants to feed to the model.\n\nCarried as base64 in JSON so it rides the same control channel as text\nand tool calls (the audio channel stays pure PCM). Oversized frames are\nwrapped in ``RealtimeClientEnvelope`` chunks transparently by the SDK.\n\n``stream_id`` lets the application label multiple concurrent video\nstreams (e.g. ``camera``, ``screen_share_main``).",
         "properties": {
           "data": {
-            "title": "Data",
             "type": "string"
           },
           "mime_type": {
             "default": "image/jpeg",
-            "title": "Mime Type",
             "type": "string"
           },
           "stream_id": {
             "default": "video.input.default",
-            "title": "Stream Id",
             "type": "string"
           },
           "type": {
             "const": "send-image",
             "default": "send-image",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -468,13 +449,11 @@
         "description": "Toggle the mic gate. While muted the client drops outbound audio frames.",
         "properties": {
           "muted": {
-            "title": "Muted",
             "type": "boolean"
           },
           "type": {
             "const": "mute",
             "default": "mute",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -491,7 +470,6 @@
           "type": {
             "const": "ping",
             "default": "ping",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -505,13 +483,11 @@
         "description": "Send a text message instead of audio.",
         "properties": {
           "content": {
-            "title": "Content",
             "type": "string"
           },
           "type": {
             "const": "send-text",
             "default": "send-text",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -527,23 +503,19 @@
         "properties": {
           "description": {
             "maxLength": 2048,
-            "title": "Description",
             "type": "string"
           },
           "kind": {
             "const": "client",
             "default": "client",
-            "title": "Kind",
             "type": "string"
           },
           "name": {
             "maxLength": 64,
-            "title": "Name",
             "type": "string"
           },
           "parameters": {
             "additionalProperties": true,
-            "title": "Parameters",
             "type": "object"
           }
         },
@@ -556,55 +528,31 @@
         "title": "RealtimeClientToolSpec",
         "type": "object"
       },
-      "RealtimeCosmoCursorPoint": {
-        "description": "Cursor position for a cosmo turn-context \u2014 screen coordinates, AppKit\nbottom-left origin.",
-        "properties": {
-          "x": {
-            "title": "X",
-            "type": "number"
-          },
-          "y": {
-            "title": "Y",
-            "type": "number"
-          }
-        },
-        "required": [
-          "x",
-          "y"
-        ],
-        "title": "RealtimeCosmoCursorPoint",
-        "type": "object"
-      },
       "RealtimeCosmoSessionState": {
-        "description": "First-party cosmo event: live session state after a ``set_state`` tool\nwrite \u2014 feeds the playground inspector / disposition panel. Carries the\nfull canonical state, not a delta; ``stage`` is hoisted from\n``state[\"stage\"]`` and ``warnings`` are the advisory schema findings the\nmodel also saw in its tool result.",
+        "description": "First-party cosmo event: live session state after a ``set_state`` tool\nwrite, for rendering call progress in a client UI. Carries the\nfull canonical state, not a delta; ``stage`` is hoisted from\n``state[\"stage\"]`` and ``warnings`` are the advisory schema findings the\nmodel also saw in its tool result.",
         "properties": {
           "stage": {
-            "title": "Stage",
             "type": "string"
           },
           "state": {
             "additionalProperties": true,
-            "title": "State",
             "type": "object"
           },
           "type": {
             "const": "cosmo.session-state",
             "default": "cosmo.session-state",
-            "title": "Type",
             "type": "string"
           },
           "updated_keys": {
             "items": {
               "type": "string"
             },
-            "title": "Updated Keys",
             "type": "array"
           },
           "warnings": {
             "items": {
               "type": "string"
             },
-            "title": "Warnings",
             "type": "array"
           }
         },
@@ -614,92 +562,40 @@
         "title": "RealtimeCosmoSessionState",
         "type": "object"
       },
-      "RealtimeCosmoTurnContext": {
-        "description": "First-party cosmo client message: per-turn desktop context attached to a\nuser turn. Wire-compatible with the internal ``turn-context`` \u2014 the boundary\nparses inbound client messages directly against the internal union, so the\n``type`` and field names mirror it exactly. Part of the cosmo.* surface.",
-        "properties": {
-          "client_turn_seq": {
-            "minimum": 0.0,
-            "title": "Client Turn Seq",
-            "type": "integer"
-          },
-          "cursor": {
-            "$ref": "#/components/schemas/RealtimeCosmoCursorPoint"
-          },
-          "extras": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "title": "Extras",
-            "type": "object"
-          },
-          "frontmost_app": {
-            "maxLength": 256,
-            "title": "Frontmost App",
-            "type": "string"
-          },
-          "open_apps": {
-            "items": {
-              "type": "string"
-            },
-            "maxItems": 10,
-            "title": "Open Apps",
-            "type": "array"
-          },
-          "type": {
-            "const": "turn-context",
-            "default": "turn-context",
-            "title": "Type",
-            "type": "string"
-          }
-        },
-        "required": [
-          "type"
-        ],
-        "title": "RealtimeCosmoTurnContext",
-        "type": "object"
-      },
       "RealtimeCosmoUsage": {
         "description": "First-party cosmo event: cumulative token usage for the live session,\nsplit by direction and modality. Emitted for any external session whose\nupstream reports usage \u2014 translation is stateless, not gated on the\n``cosmo`` config block.",
         "properties": {
           "input_audio_tokens": {
             "default": 0,
-            "title": "Input Audio Tokens",
             "type": "integer"
           },
           "input_cached_tokens": {
             "default": 0,
-            "title": "Input Cached Tokens",
             "type": "integer"
           },
           "input_image_tokens": {
             "default": 0,
-            "title": "Input Image Tokens",
             "type": "integer"
           },
           "input_text_tokens": {
             "default": 0,
-            "title": "Input Text Tokens",
             "type": "integer"
           },
           "output_audio_tokens": {
             "default": 0,
-            "title": "Output Audio Tokens",
             "type": "integer"
           },
           "output_text_tokens": {
             "default": 0,
-            "title": "Output Text Tokens",
             "type": "integer"
           },
           "total_tokens": {
             "default": 0,
-            "title": "Total Tokens",
             "type": "integer"
           },
           "type": {
             "const": "cosmo.usage",
             "default": "cosmo.usage",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -725,7 +621,6 @@
           "kind": {
             "const": "detect_objects",
             "default": "detect_objects",
-            "title": "Kind",
             "type": "string"
           }
         },
@@ -736,17 +631,15 @@
         "type": "object"
       },
       "RealtimeEndCall": {
-        "description": "End-call action for a server hook (execution lands with #8344).",
+        "description": "End-call action for a server hook.",
         "properties": {
           "farewell": {
             "maxLength": 4096,
-            "title": "Farewell",
             "type": "string"
           },
           "type": {
             "const": "end_call",
             "default": "end_call",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -756,6 +649,31 @@
         "title": "RealtimeEndCall",
         "type": "object"
       },
+      "RealtimeEndCallToolSpec": {
+        "additionalProperties": false,
+        "description": "Opt-in to the server-executed hang-up tool, so the model can end the\ncall itself once the exchange is finished.\n\nThe server owns the model-facing declaration \u2014 zero-config; unknown\nfields are a schema error. No availability gate: declaring it is the\ngrant. Ending binds the call, not just the agent \u2014 every leg drops \u2014\nand the spoken goodbye is allowed to finish playing first.\n\nNot the ``end_call`` silence-hook action, which hangs up on a caller who\nstopped talking; this is the hang-up the model decides on.",
+        "properties": {
+          "kind": {
+            "const": "end_call",
+            "default": "end_call",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "RealtimeEndCallToolSpec",
+        "type": "object"
+      },
+      "RealtimeEndOfSpeechSensitivity": {
+        "description": "How readily the Gemini realtime model decides the user's turn ended.\n\nMirrors ``google.genai.types.EndSensitivity`` (minus the unspecified\nsentinel), the end-of-turn counterpart to the start-of-speech sensitivity\n``interruption_sensitivity`` drives. ``high`` ends the turn sooner (lower\nendpointing latency, more likely to cut in on a mid-thought pause);\n``None`` keeps the provider default.",
+        "enum": [
+          "low",
+          "high"
+        ],
+        "title": "RealtimeEndOfSpeechSensitivity",
+        "type": "string"
+      },
       "RealtimeError": {
         "description": "Recoverable or terminal error. Clients switch on ``code`` for\nrecovery UX.\n\n``fatal=True`` signals the session is dead; the client should tear down\nand reconnect rather than retry the current turn. ``fatal=False`` means\nthis turn failed but the session can continue.",
         "properties": {
@@ -764,17 +682,14 @@
           },
           "fatal": {
             "default": false,
-            "title": "Fatal",
             "type": "boolean"
           },
           "message": {
-            "title": "Message",
             "type": "string"
           },
           "type": {
             "const": "error",
             "default": "error",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -787,25 +702,21 @@
         "type": "object"
       },
       "RealtimeErrorBody": {
-        "description": "The error payload every non-2xx external API response carries.\n\n``type`` is the error family (``api_error`` / ``validation_error`` /\n``internal_error``). ``code`` is the machine-readable rejection code for\ntyped session-start rejections (e.g. ``version_mismatch``,\n``invalid_tool_config``); absent otherwise. ``errors`` lists field-level\nviolations for ``validation_error`` responses.",
+        "description": "The error payload non-2xx external API responses carry.\n\n``type`` is the error family (``api_error`` / ``validation_error`` /\n``internal_error``). ``code`` is the machine-readable rejection code for\ntyped session-start rejections (e.g. ``version_mismatch``,\n``invalid_tool_config``); absent otherwise. ``errors`` lists field-level\nviolations for ``validation_error`` responses.\n\nOne exception: requests rejected by the authentication layer (401)\nreturn ``{\"detail\": \"...\"}`` without this envelope.",
         "properties": {
           "code": {
-            "title": "Code",
             "type": "string"
           },
           "errors": {
             "items": {
               "$ref": "#/components/schemas/RealtimeFieldError"
             },
-            "title": "Errors",
             "type": "array"
           },
           "message": {
-            "title": "Message",
             "type": "string"
           },
           "type": {
-            "title": "Type",
             "type": "string"
           }
         },
@@ -817,7 +728,7 @@
         "type": "object"
       },
       "RealtimeErrorCode": {
-        "description": "Stable error codes the FE switches on to choose a recovery UX.",
+        "description": "Stable error codes carried on wire-protocol error events; clients\nswitch on them to choose recovery behavior. Distinct from the REST\nrejection codes carried on error envelopes (``error.code``).",
         "enum": [
           "auth_failed",
           "workspace_forbidden",
@@ -831,7 +742,7 @@
         "type": "string"
       },
       "RealtimeErrorEnvelope": {
-        "description": "Wire shape of every non-2xx external API response.",
+        "description": "Wire shape of non-2xx external API responses, except auth-layer 401s\n(which return ``{\"detail\": \"...\"}``).",
         "properties": {
           "error": {
             "$ref": "#/components/schemas/RealtimeErrorBody"
@@ -850,7 +761,6 @@
           "kind": {
             "const": "examine_image",
             "default": "examine_image",
-            "title": "Kind",
             "type": "string"
           }
         },
@@ -865,7 +775,6 @@
         "properties": {
           "resume_session_id": {
             "format": "uuid",
-            "title": "Resume Session Id",
             "type": "string"
           }
         },
@@ -886,15 +795,12 @@
                 }
               ]
             },
-            "title": "Loc",
             "type": "array"
           },
           "msg": {
-            "title": "Msg",
             "type": "string"
           },
           "type": {
-            "title": "Type",
             "type": "string"
           }
         },
@@ -908,22 +814,35 @@
         "additionalProperties": false,
         "description": "Gemini-realtime model knobs. Valid only when the selected ``model`` runs\non Gemini; the ``provider`` discriminator makes setting these for any other\nprovider a schema error rather than a silent no-op.",
         "properties": {
+          "end_of_speech_sensitivity": {
+            "$ref": "#/components/schemas/RealtimeEndOfSpeechSensitivity"
+          },
+          "include_thoughts": {
+            "type": "boolean"
+          },
           "max_output_tokens": {
             "maximum": 32768.0,
             "minimum": 1.0,
-            "title": "Max Output Tokens",
+            "type": "integer"
+          },
+          "prefix_padding_ms": {
+            "maximum": 5000.0,
+            "minimum": 0.0,
             "type": "integer"
           },
           "provider": {
             "const": "gemini",
             "default": "gemini",
-            "title": "Provider",
             "type": "string"
+          },
+          "silence_duration_ms": {
+            "maximum": 5000.0,
+            "minimum": 0.0,
+            "type": "integer"
           },
           "temperature": {
             "maximum": 2.0,
             "minimum": 0.0,
-            "title": "Temperature",
             "type": "number"
           },
           "thinking_level": {
@@ -942,7 +861,6 @@
           },
           "greeting": {
             "maxLength": 4000,
-            "title": "Greeting",
             "type": "string"
           },
           "hooks": {
@@ -950,11 +868,9 @@
               "$ref": "#/components/schemas/RealtimeSilenceTimeout"
             },
             "maxItems": 16,
-            "title": "Hooks",
             "type": "array"
           },
           "instructions": {
-            "title": "Instructions",
             "type": "string"
           },
           "interruption_sensitivity": {
@@ -962,16 +878,14 @@
             "default": "default"
           },
           "model": {
-            "title": "Model",
             "type": "string"
           },
           "model_options": {
             "discriminator": {
               "mapping": {
-                "cosmo_voice_personaplex": "#/components/schemas/RealtimePersonaplexModelOptions",
-                "cosmo_voice_ultravox": "#/components/schemas/RealtimeUltravoxModelOptions",
                 "gemini": "#/components/schemas/RealtimeGeminiModelOptions",
-                "openai": "#/components/schemas/RealtimeOpenAIModelOptions"
+                "openai": "#/components/schemas/RealtimeOpenAIModelOptions",
+                "openai_mini": "#/components/schemas/RealtimeOpenAIMiniModelOptions"
               },
               "propertyName": "provider"
             },
@@ -983,13 +897,9 @@
                 "$ref": "#/components/schemas/RealtimeOpenAIModelOptions"
               },
               {
-                "$ref": "#/components/schemas/RealtimeUltravoxModelOptions"
-              },
-              {
-                "$ref": "#/components/schemas/RealtimePersonaplexModelOptions"
+                "$ref": "#/components/schemas/RealtimeOpenAIMiniModelOptions"
               }
-            ],
-            "title": "Model Options"
+            ]
           },
           "tools": {
             "items": {
@@ -998,6 +908,7 @@
                   "catalog": "#/components/schemas/RealtimeCatalogToolSpec",
                   "client": "#/components/schemas/RealtimeClientToolSpec",
                   "detect_objects": "#/components/schemas/RealtimeDetectObjectsToolSpec",
+                  "end_call": "#/components/schemas/RealtimeEndCallToolSpec",
                   "examine_image": "#/components/schemas/RealtimeExamineImageToolSpec",
                   "point_at_object": "#/components/schemas/RealtimePointAtObjectToolSpec",
                   "screen_locate": "#/components/schemas/RealtimeScreenLocateToolSpec",
@@ -1030,17 +941,18 @@
                 },
                 {
                   "$ref": "#/components/schemas/RealtimeScreenLocateToolSpec"
+                },
+                {
+                  "$ref": "#/components/schemas/RealtimeEndCallToolSpec"
                 }
               ]
             },
             "maxItems": 10000,
-            "title": "Tools",
             "type": "array"
           },
           "type": {
             "const": "inline",
             "default": "inline",
-            "title": "Type",
             "type": "string"
           },
           "voice": {
@@ -1058,17 +970,14 @@
         "properties": {
           "is_final": {
             "default": false,
-            "title": "Is Final",
             "type": "boolean"
           },
           "text": {
-            "title": "Text",
             "type": "string"
           },
           "type": {
             "const": "model-text",
             "default": "model-text",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -1079,32 +988,46 @@
         "title": "RealtimeModelText",
         "type": "object"
       },
+      "RealtimeOpenAIMiniModelOptions": {
+        "additionalProperties": false,
+        "description": "OpenAI-Realtime mini-tier model knobs \u2014 the same API as\n``RealtimeOpenAIModelOptions`` on a faster, cheaper model, and\nequally untunable today.",
+        "properties": {
+          "provider": {
+            "const": "openai_mini",
+            "default": "openai_mini",
+            "type": "string"
+          }
+        },
+        "title": "RealtimeOpenAIMiniModelOptions",
+        "type": "object"
+      },
       "RealtimeOpenAIModelOptions": {
         "additionalProperties": false,
-        "description": "OpenAI-Realtime model knobs. OpenAI Realtime pins its own sampling and\ntoken limits, so nothing is tunable here today; the block exists so an\nOpenAI agent is representable and future knobs have a typed home.",
+        "description": "OpenAI-Realtime model knobs. OpenAI Realtime pins its own sampling and\ntoken limits, so only turn-taking is tunable here.\n\n``turn_detection`` selects which detector runs and decides which of the\nremaining knobs apply: ``eagerness`` belongs to ``semantic_vad``, the two\nwindow knobs to ``server_vad``. Sending a knob from the other mode is\nrejected at session start rather than silently ignored.",
         "properties": {
+          "eagerness": {
+            "$ref": "#/components/schemas/RealtimeSemanticEagerness"
+          },
+          "prefix_padding_ms": {
+            "maximum": 5000.0,
+            "minimum": 0.0,
+            "type": "integer"
+          },
           "provider": {
             "const": "openai",
             "default": "openai",
-            "title": "Provider",
             "type": "string"
+          },
+          "silence_duration_ms": {
+            "maximum": 5000.0,
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "turn_detection": {
+            "$ref": "#/components/schemas/RealtimeTurnDetectionMode"
           }
         },
         "title": "RealtimeOpenAIModelOptions",
-        "type": "object"
-      },
-      "RealtimePersonaplexModelOptions": {
-        "additionalProperties": false,
-        "description": "PersonaPlex (Cosmo Voice Light) model knobs \u2014 none tunable today; the\nblock exists so a PersonaPlex agent is representable.",
-        "properties": {
-          "provider": {
-            "const": "cosmo_voice_personaplex",
-            "default": "cosmo_voice_personaplex",
-            "title": "Provider",
-            "type": "string"
-          }
-        },
-        "title": "RealtimePersonaplexModelOptions",
         "type": "object"
       },
       "RealtimePointAtObjectToolSpec": {
@@ -1114,7 +1037,6 @@
           "kind": {
             "const": "point_at_object",
             "default": "point_at_object",
-            "title": "Kind",
             "type": "string"
           }
         },
@@ -1130,7 +1052,6 @@
           "type": {
             "const": "pong",
             "default": "pong",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -1144,7 +1065,6 @@
         "description": "Which realtime model providers the caller may select per session.\n\nClients that surface a provider picker should hide it when\n``openai_provider_available`` is false \u2014 a picker the server would\nsilently override is worse than no picker.",
         "properties": {
           "openai_provider_available": {
-            "title": "Openai Provider Available",
             "type": "boolean"
           }
         },
@@ -1161,30 +1081,25 @@
             "$ref": "#/components/schemas/RealtimeResolvedAgent"
           },
           "max_session_seconds": {
-            "title": "Max Session Seconds",
             "type": "integer"
           },
           "rejected_tools": {
             "items": {
               "$ref": "#/components/schemas/RealtimeRejectedTool"
             },
-            "title": "Rejected Tools",
             "type": "array"
           },
           "session_id": {
             "format": "uuid",
-            "title": "Session Id",
             "type": "string"
           },
           "type": {
             "const": "ready",
             "default": "ready",
-            "title": "Type",
             "type": "string"
           },
           "version": {
             "default": "1.0",
-            "title": "Version",
             "type": "string"
           }
         },
@@ -1199,18 +1114,15 @@
         "description": "Server is transparently rotating the upstream session.\n\nEmitted after the upstream signals an imminent shutdown when the server\nhas cached a resumption handle and is reopening the model session. The\ntransport and session state survive the swap; clients can show a brief\n\"reconnecting\u2026\" indicator and otherwise stay put.",
         "properties": {
           "seconds_remaining": {
-            "title": "Seconds Remaining",
             "type": "number"
           },
           "type": {
             "const": "reconnecting",
             "default": "reconnecting",
-            "title": "Type",
             "type": "string"
           },
           "version": {
             "default": "1.0",
-            "title": "Version",
             "type": "string"
           }
         },
@@ -1224,11 +1136,9 @@
         "description": "One tool spec the server refused, with the reason \u2014 so a client can\nlog *why* a spec was dropped instead of debugging silence.",
         "properties": {
           "name": {
-            "title": "Name",
             "type": "string"
           },
           "reason": {
-            "title": "Reason",
             "type": "string"
           }
         },
@@ -1243,14 +1153,12 @@
         "description": "Resolved-agent summary echoed on ``ready`` when the session referenced a\nregistry agent (``agent.name``). Informational only \u2014 never authoritative;\nclients don't act on it.",
         "properties": {
           "name": {
-            "title": "Name",
             "type": "string"
           },
           "tools": {
             "items": {
               "type": "string"
             },
-            "title": "Tools",
             "type": "array"
           }
         },
@@ -1265,18 +1173,15 @@
         "properties": {
           "prompt": {
             "maxLength": 4096,
-            "title": "Prompt",
             "type": "string"
           },
           "text": {
             "maxLength": 4096,
-            "title": "Text",
             "type": "string"
           },
           "type": {
             "const": "say",
             "default": "say",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -1288,12 +1193,11 @@
       },
       "RealtimeScreenLocateToolSpec": {
         "additionalProperties": false,
-        "description": "Opt-in to the server-executed screen locator.\n\nResolves a description to an element on the client's shared screen and\nhands the model a ref addressing it, which the model passes to whichever\nscreen renderer the client declared (``cosmo_sdk_screen_click`` /\n``cosmo_sdk_screen_highlight``). Not authorable: SDKs emit this entry\nmechanically when the host supplies a screen-capture handler, whose\n``screen_capture`` RPC the locator drives. Zero-config;\nunknown fields are a schema error.\n\nThe locator itself has no availability gate. ``cosmo_sdk_screen_click``\ndoes \u2014 clicking acts on the user's machine, so it stays behind the\ndesktop-control policy, and a session that cannot run it starts without\nit and reports the drop on ``ready.rejected_tools`` under that name.",
+        "description": "Opt-in to the server-executed screen locator.\n\nResolves a description to an element on the client's shared screen and\nhands the model an opaque handle for it, which the model passes to\nwhichever screen renderer the client declared\n(``cosmo_sdk_screen_click_element`` /\n``cosmo_sdk_screen_highlight_element``). Not authorable: SDKs emit this\nentry mechanically when the host supplies a screen-capture handler, whose\n``screen_capture`` RPC the locator drives. Zero-config;\nunknown fields are a schema error.\n\nThe locator itself has no availability gate.\n``cosmo_sdk_screen_click_element`` does \u2014 clicking acts on the user's\nmachine, so it stays behind the desktop-control policy, and a session that\ncannot run it starts without it and reports the drop on\n``ready.rejected_tools`` under that name.",
         "properties": {
           "kind": {
             "const": "screen_locate",
             "default": "screen_locate",
-            "title": "Kind",
             "type": "string"
           }
         },
@@ -1303,29 +1207,35 @@
         "title": "RealtimeScreenLocateToolSpec",
         "type": "object"
       },
+      "RealtimeSemanticEagerness": {
+        "description": "How eagerly OpenAI's ``semantic_vad`` closes the user's turn.\n\n``low`` waits longer for the user to continue, ``high`` responds sooner;\n``auto`` is the provider default and behaves like ``medium``.",
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "auto"
+        ],
+        "title": "RealtimeSemanticEagerness",
+        "type": "string"
+      },
       "RealtimeServerEnvelope": {
         "description": "Generic chunked carrier for any oversized server message.\n\nMirror of ``RealtimeClientEnvelope`` for the server\u2192client direction.\nThe server wraps any ``RealtimeServerMessage`` whose serialized JSON\nexceeds the transport threshold into a sequence of these chunks; the SDK\nbuffers by ``envelope_id``, base64-decodes + concatenates, and\nre-dispatches the inner message through the same handler path as\nun-chunked messages.\n\n``data`` is base64 over the UTF-8 bytes of the inner message JSON for\nthe same reason as the client side: keeps every chunk ASCII-safe so\nbyte-boundary splits never land mid-codepoint.",
         "properties": {
           "data": {
-            "title": "Data",
             "type": "string"
           },
           "envelope_id": {
-            "title": "Envelope Id",
             "type": "string"
           },
           "seq": {
-            "title": "Seq",
             "type": "integer"
           },
           "total": {
-            "title": "Total",
             "type": "integer"
           },
           "type": {
             "const": "server-envelope-chunk",
             "default": "server-envelope-chunk",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -1340,17 +1250,15 @@
         "type": "object"
       },
       "RealtimeServerToolSpec": {
-        "description": "Opt-in to one server-executed tool by its dot-namespaced name\n(e.g. ``\"cosmo.web_search\"``).\n\nDeprecated: typed per-tool kinds (``web_search``, ``examine_image``,\n``detect``, ``point``) supersede the generic name-reference, which is\nhonored only by the legacy ``/session/start`` flow and remains the only\npath to ``cosmo.end_call`` / ``cosmo.view_state`` / ``cosmo.set_state``\nuntil those gain typed kinds.\n\nServer tools execute server-side; the session observes them through the\n``tool-call`` / ``tool-dispatch-started`` / ``tool-result`` lifecycle.\nUnknown names are rejected at session start with a typed 422\n(``unknown_server_tool``).",
+        "description": "Opt-in to one server-executed tool by its dot-namespaced name\n(e.g. ``\"cosmo.web_search\"``).\n\nDeprecated and no longer executed anywhere: typed per-tool kinds\n(``web_search``, ``examine_image``, ``detect``, ``point``,\n``end_call``) supersede the generic name-reference, and the flow that\nhonored it is gone \u2014 a config carrying one is rejected at session start\nwith a typed 422 (``invalid_tool_config``). ``cosmo.view_state`` /\n``cosmo.set_state`` have no typed kinds yet, so they are unreachable\nuntil they gain them.\n\nServer tools execute server-side; the session observes them through the\n``tool-call`` / ``tool-dispatch-started`` / ``tool-result`` lifecycle.",
         "properties": {
           "kind": {
             "const": "server",
             "default": "server",
-            "title": "Kind",
             "type": "string"
           },
           "name": {
             "maxLength": 128,
-            "title": "Name",
             "type": "string"
           }
         },
@@ -1379,8 +1287,7 @@
               {
                 "$ref": "#/components/schemas/RealtimeInlineAgentConfig"
               }
-            ],
-            "title": "Agent"
+            ]
           },
           "session": {
             "$ref": "#/components/schemas/RealtimeSessionParams"
@@ -1388,12 +1295,10 @@
           "type": {
             "const": "session-config",
             "default": "session-config",
-            "title": "Type",
             "type": "string"
           },
           "version": {
             "default": "1.0",
-            "title": "Version",
             "type": "string"
           }
         },
@@ -1407,13 +1312,11 @@
         "description": "The server ended the session on purpose. Published just before the\ntransport tears down so clients can render a clean terminal state\ninstead of treating the room drop as a failure. Delivery is\nbest-effort \u2014 the room close may still arrive first.",
         "properties": {
           "reason": {
-            "title": "Reason",
             "type": "string"
           },
           "type": {
             "const": "session-ended",
             "default": "session-ended",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -1428,17 +1331,14 @@
         "description": "The server will end this session shortly (e.g. the max-duration cap\nis about to fire). Clients may show a countdown; the session keeps\nrunning until ``session-ended``.",
         "properties": {
           "reason": {
-            "title": "Reason",
             "type": "string"
           },
           "seconds_remaining": {
-            "title": "Seconds Remaining",
             "type": "number"
           },
           "type": {
             "const": "session-ending-soon",
             "default": "session-ending-soon",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -1459,11 +1359,9 @@
           "max_session_seconds": {
             "maximum": 14400.0,
             "minimum": 60.0,
-            "title": "Max Session Seconds",
             "type": "integer"
           },
           "store_recording": {
-            "title": "Store Recording",
             "type": "boolean"
           }
         },
@@ -1471,21 +1369,18 @@
         "type": "object"
       },
       "RealtimeSessionResponse": {
-        "description": "Public response shape for both cookie-auth and API-key session-start.\n\nThe two surfaces returned identical payloads; centralising the\nmodel + the start-or-503 wrapper keeps them from drifting.",
+        "description": "Connection credentials for a started session.\n\nThe client joins the LiveKit room at ``livekit_url`` with ``token``;\n``session_id`` correlates the session across API calls and session\nevents.",
         "properties": {
           "livekit_url": {
             "description": "LiveKit room URL to connect to.",
-            "title": "Livekit Url",
             "type": "string"
           },
           "room_name": {
             "description": "LiveKit room name.",
-            "title": "Room Name",
             "type": "string"
           },
           "session_id": {
             "description": "Server-minted session identifier.",
-            "title": "Session Id",
             "type": "string"
           },
           "timings": {
@@ -1494,7 +1389,6 @@
           },
           "token": {
             "description": "Short-lived participant join token.",
-            "title": "Token",
             "type": "string"
           }
         },
@@ -1511,35 +1405,27 @@
         "description": "Server-side phase breakdown of session start (milliseconds).\n\nMirrors the ``starter_*`` fields of the \"realtime session dispatched\"\nlog line. Echoed to the client so it can emit one joined\nstartup-waterfall event (server + client phases) keyed by session_id,\ninstead of leaving the join to log archaeology.",
         "properties": {
           "db_insert_ms": {
-            "title": "Db Insert Ms",
             "type": "integer"
           },
           "dispatch_ms": {
-            "title": "Dispatch Ms",
             "type": "integer"
           },
           "mint_tokens_ms": {
-            "title": "Mint Tokens Ms",
             "type": "integer"
           },
           "project_check_ms": {
-            "title": "Project Check Ms",
             "type": "integer"
           },
           "provider_resolve_ms": {
-            "title": "Provider Resolve Ms",
             "type": "integer"
           },
           "resolve_ms": {
-            "title": "Resolve Ms",
             "type": "integer"
           },
           "total_ms": {
-            "title": "Total Ms",
             "type": "integer"
           },
           "version_check_ms": {
-            "title": "Version Check Ms",
             "type": "integer"
           }
         },
@@ -1573,19 +1459,16 @@
               {
                 "$ref": "#/components/schemas/RealtimeEndCall"
               }
-            ],
-            "title": "Action"
+            ]
           },
           "max_count": {
             "default": 3,
             "maximum": 10.0,
             "minimum": 1.0,
-            "title": "Max Count",
             "type": "integer"
           },
           "name": {
             "maxLength": 256,
-            "title": "Name",
             "type": "string"
           },
           "reset_mode": {
@@ -1594,19 +1477,16 @@
               "never",
               "on_user_speech"
             ],
-            "title": "Reset Mode",
             "type": "string"
           },
           "timeout_seconds": {
             "maximum": 1000.0,
             "minimum": 1.0,
-            "title": "Timeout Seconds",
             "type": "number"
           },
           "trigger": {
             "const": "user.speech.timeout",
             "default": "user.speech.timeout",
-            "title": "Trigger",
             "type": "string"
           }
         },
@@ -1632,17 +1512,14 @@
         "description": "Model decided to invoke a server-executed tool.\n\nThree-event lifecycle:\n  ``tool-call`` (model decided)\n    \u2192 ``tool-dispatch-started`` (server-side handler began)\n    \u2192 ``tool-result`` (completed).",
         "properties": {
           "name": {
-            "title": "Name",
             "type": "string"
           },
           "tool_call_id": {
-            "title": "Tool Call Id",
             "type": "string"
           },
           "type": {
             "const": "tool-call",
             "default": "tool-call",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -1658,17 +1535,14 @@
         "description": "Server-side handler for the tool call began executing.\n\nSits between ``tool-call`` and ``tool-result`` to let UIs show a\n\"dispatching\u2026\" state \u2014 useful for slow tools where the gap between\nmodel decision and result is multiple seconds.",
         "properties": {
           "name": {
-            "title": "Name",
             "type": "string"
           },
           "tool_call_id": {
-            "title": "Tool Call Id",
             "type": "string"
           },
           "type": {
             "const": "tool-dispatch-started",
             "default": "tool-dispatch-started",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -1685,16 +1559,13 @@
         "properties": {
           "args": {
             "additionalProperties": true,
-            "title": "Args",
             "type": "object"
           },
           "executable": {
             "default": true,
-            "title": "Executable",
             "type": "boolean"
           },
           "name": {
-            "title": "Name",
             "type": "string"
           },
           "origin": {
@@ -1703,21 +1574,17 @@
               "realtime",
               "server"
             ],
-            "title": "Origin",
             "type": "string"
           },
           "request_id": {
-            "title": "Request Id",
             "type": "string"
           },
           "tool_call_id": {
-            "title": "Tool Call Id",
             "type": "string"
           },
           "type": {
             "const": "tool-invocation",
             "default": "tool-invocation",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -1734,16 +1601,13 @@
         "description": "A long-running client tool finished off-band and is delivering its\nterminal result. The server resolves the original tool call from\n``job_id`` and injects the outcome; ``summary`` / ``error`` are the\nmodel-facing text and ``result`` is structured data for logging.\n\nHalf of the background client-tool primitive \u2014 a tool whose work outlives\nthe RPC reply budget acks first and lands its outcome here. Every SDK\nimplements it, so it is protocol vocabulary rather than a first-party\nextension.",
         "properties": {
           "error": {
-            "title": "Error",
             "type": "string"
           },
           "job_id": {
-            "title": "Job Id",
             "type": "string"
           },
           "result": {
             "additionalProperties": true,
-            "title": "Result",
             "type": "object"
           },
           "status": {
@@ -1751,21 +1615,17 @@
               "completed",
               "failed"
             ],
-            "title": "Status",
             "type": "string"
           },
           "summary": {
-            "title": "Summary",
             "type": "string"
           },
           "tool_name": {
-            "title": "Tool Name",
             "type": "string"
           },
           "type": {
             "const": "tool_job_result",
             "default": "tool_job_result",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -1782,21 +1642,17 @@
         "description": "Server-side tool finished. ``summary`` is a short human-readable line.",
         "properties": {
           "ok": {
-            "title": "Ok",
             "type": "boolean"
           },
           "summary": {
-            "title": "Summary",
             "type": "string"
           },
           "tool_call_id": {
-            "title": "Tool Call Id",
             "type": "string"
           },
           "type": {
             "const": "tool-result",
             "default": "tool-result",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -1812,20 +1668,17 @@
         "description": "Streaming transcript event for either speaker.\n\nFor the assistant role in audio sessions, this is the audio\ntranscription \u2014 the words the listener actually heard. The model may\nALSO emit a separate text channel via ``RealtimeModelText``; consumers\nthat render a \"what was spoken\" bubble should subscribe to\n``transcript`` only.\n\nContract (wire-level, applies to both user and assistant):\n\n* Streaming events (``is_final=False``): ``text`` is the **new\n  fragment since the previous event** for that role's turn (a\n  delta). Consumers append.\n* Terminating event (``is_final=True``): ``text`` is the\n  **cumulative full transcript** for the turn. Consumers replace\n  whatever they accumulated with this value.\n\nTwo carve-outs where the terminating event is NOT the full turn, both\nload-bearing rather than accidental:\n\n* **Empty final.** A turn the model produced nothing usable for (a\n  suppressed or garbled turn) finalizes with ``text=\"\"``. It means an\n  empty turn, not \"unchanged\" \u2014 a consumer that skips empty finals\n  leaves the turn's bubble dangling into the next one.\n* **Suffix final on a silent session.** When the agent runs with\n  ``audio.output=False``, a user final that arrives after the VAD\n  endpoint already committed the utterance is stripped of the committed\n  prefix, so it carries only the remainder. Replacing on final would\n  drop the part committed at the endpoint.\n\nA consumer that only ever appends non-finals and replaces on final is\ncorrect for the common path; these two need the extra handling.",
         "properties": {
           "is_final": {
-            "title": "Is Final",
             "type": "boolean"
           },
           "role": {
             "$ref": "#/components/schemas/RealtimeTranscriptRole"
           },
           "text": {
-            "title": "Text",
             "type": "string"
           },
           "type": {
             "const": "transcript",
             "default": "transcript",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -1848,7 +1701,7 @@
         "type": "string"
       },
       "RealtimeTtsProvider": {
-        "description": "External TTS providers Ultravox can render via ``externalVoice``.",
+        "description": "External TTS providers a speech-to-speech model can render.",
         "enum": [
           "elevenlabs",
           "cartesia"
@@ -1857,11 +1710,10 @@
         "type": "string"
       },
       "RealtimeTtsVoice": {
-        "description": "Provider-agnostic external-TTS voice selection. The runtime maps this to\nthe speech-to-speech provider's wire format (Ultravox ``externalVoice``\ntoday). ``voice_id`` is the TTS provider's own voice id; the tuning fields\napply to ElevenLabs (Cartesia ignores the ElevenLabs-specific ones).",
+        "description": "Provider-agnostic external-TTS voice selection. The runtime maps this to\nthe speech-to-speech provider's own wire format. ``voice_id`` is the TTS\nprovider's own voice id; the tuning fields apply to ElevenLabs (Cartesia\nignores the ElevenLabs-specific ones).",
         "properties": {
           "model": {
             "maxLength": 128,
-            "title": "Model",
             "type": "string"
           },
           "provider": {
@@ -1870,32 +1722,26 @@
           "similarity_boost": {
             "maximum": 1.0,
             "minimum": 0.0,
-            "title": "Similarity Boost",
             "type": "number"
           },
           "speed": {
-            "title": "Speed",
             "type": "number"
           },
           "stability": {
             "maximum": 1.0,
             "minimum": 0.0,
-            "title": "Stability",
             "type": "number"
           },
           "style": {
             "maximum": 1.0,
             "minimum": 0.0,
-            "title": "Style",
             "type": "number"
           },
           "use_speaker_boost": {
-            "title": "Use Speaker Boost",
             "type": "boolean"
           },
           "voice_id": {
             "maxLength": 256,
-            "title": "Voice Id",
             "type": "string"
           }
         },
@@ -1915,7 +1761,6 @@
           "type": {
             "const": "turn-complete",
             "default": "turn-complete",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -1926,31 +1771,14 @@
         "title": "RealtimeTurnComplete",
         "type": "object"
       },
-      "RealtimeUltravoxModelOptions": {
-        "additionalProperties": false,
-        "description": "Ultravox model knobs. Valid only when the selected ``model`` runs on\nUltravox.",
-        "properties": {
-          "provider": {
-            "const": "cosmo_voice_ultravox",
-            "default": "cosmo_voice_ultravox",
-            "title": "Provider",
-            "type": "string"
-          },
-          "temperature": {
-            "maximum": 2.0,
-            "minimum": 0.0,
-            "title": "Temperature",
-            "type": "number"
-          },
-          "turn_endpoint_delay_seconds": {
-            "maximum": 5.0,
-            "minimum": 0.0,
-            "title": "Turn Endpoint Delay Seconds",
-            "type": "number"
-          }
-        },
-        "title": "RealtimeUltravoxModelOptions",
-        "type": "object"
+      "RealtimeTurnDetectionMode": {
+        "description": "Which OpenAI-Realtime turn detector runs.\n\n``server_vad`` ends the turn on a fixed silence window;\n``semantic_vad`` runs a classifier that ends it as soon as the utterance\nreads as complete. ``None`` keeps the server's default (``server_vad``).",
+        "enum": [
+          "server_vad",
+          "semantic_vad"
+        ],
+        "title": "RealtimeTurnDetectionMode",
+        "type": "string"
       },
       "RealtimeUserSpeechTimeout": {
         "description": "A server-runtime silence timeout fired: the user was silent past a\nconfigured threshold and the server performed `action`. Observability only.",
@@ -1970,29 +1798,23 @@
               {
                 "$ref": "#/components/schemas/RealtimeEndCall"
               }
-            ],
-            "title": "Action"
+            ]
           },
           "max_count": {
-            "title": "Max Count",
             "type": "integer"
           },
           "session_id": {
-            "title": "Session Id",
             "type": "string"
           },
           "silence_ms": {
-            "title": "Silence Ms",
             "type": "integer"
           },
           "trigger_count": {
-            "title": "Trigger Count",
             "type": "integer"
           },
           "type": {
             "const": "user-speech-timeout",
             "default": "user-speech-timeout",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -2013,7 +1835,6 @@
           "type": {
             "const": "user-started-speaking",
             "default": "user-started-speaking",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -2028,7 +1849,6 @@
           "type": {
             "const": "user-stopped-speaking",
             "default": "user-stopped-speaking",
-            "title": "Type",
             "type": "string"
           }
         },
@@ -2043,7 +1863,6 @@
         "properties": {
           "can_start_sessions": {
             "description": "Whether this credential carries the scope a session start needs. False means the credential is valid but under-scoped.",
-            "title": "Can Start Sessions",
             "type": "boolean"
           },
           "credential": {
@@ -2051,12 +1870,10 @@
           },
           "external_user_id": {
             "description": "The end user a minted token is bound to; null for an API key.",
-            "title": "External User Id",
             "type": "string"
           },
           "realtime_voice_available": {
             "description": "Whether this deployment has the default voice stack configured \u2014 LiveKit plus the default provider's key. A floor, not a per-session guarantee: a session that requests an opt-in provider is checked against that provider instead, so a start can still return 503 when this is true.",
-            "title": "Realtime Voice Available",
             "type": "boolean"
           },
           "scopes": {
@@ -2064,7 +1881,6 @@
             "items": {
               "type": "string"
             },
-            "title": "Scopes",
             "type": "array"
           },
           "workspace": {
@@ -2085,11 +1901,9 @@
         "description": "The workspace the credential is bound to.",
         "properties": {
           "name": {
-            "title": "Name",
             "type": "string"
           },
           "slug": {
-            "title": "Slug",
             "type": "string"
           }
         },
@@ -2106,12 +1920,10 @@
         "properties": {
           "name": {
             "maxLength": 128,
-            "title": "Name",
             "type": "string"
           },
           "speaking_style": {
             "maxLength": 8192,
-            "title": "Speaking Style",
             "type": "string"
           }
         },
@@ -2120,12 +1932,11 @@
       },
       "RealtimeWebSearchToolSpec": {
         "additionalProperties": false,
-        "description": "Opt-in to the server-executed web-search tool, as its own typed kind.\n\nThe server owns the model-facing declaration (name, description, query\nschema) \u2014 the client only opts in, so the spec carries no fields today.\nFuture configuration (result count, domain filters, freshness) lands as\ntyped fields here. Unknown fields are a schema error.\n\nTyped per-tool kinds supersede the generic ``kind=\"server\"``\nname-reference, which is deprecated and not accepted by the\nresolved-session flow. Availability is checked at session start: a\ndeployment or workspace that cannot run the tool starts the session\nwithout it and reports the drop on ``ready.rejected_tools``.",
+        "description": "Opt-in to the server-executed web-search tool, as its own typed kind.\n\nThe server owns the model-facing declaration (name, description, query\nschema) \u2014 the client only opts in, so the spec carries no fields today.\nFuture configuration (result count, domain filters, freshness) lands as\ntyped fields here. Unknown fields are a schema error.\n\nTyped per-tool kinds supersede the generic ``kind=\"server\"``\nname-reference, which is deprecated and rejected at session start.\nAvailability is checked at session start: a\ndeployment or workspace that cannot run the tool starts the session\nwithout it and reports the drop on ``ready.rejected_tools``.",
         "properties": {
           "kind": {
             "const": "web_search",
             "default": "web_search",
-            "title": "Kind",
             "type": "string"
           }
         },
@@ -2135,23 +1946,32 @@
         "title": "RealtimeWebSearchToolSpec",
         "type": "object"
       },
+      "RevokeTokenResponse": {
+        "properties": {
+          "revoked": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "revoked"
+        ],
+        "title": "RevokeTokenResponse",
+        "type": "object"
+      },
       "TranscriptTurn-Input": {
-        "description": "One transcript line as written by ``RealtimeSessionLogger.log_transcript``.",
+        "description": "One transcript line: timestamp (epoch seconds), speaker role, and text.",
         "properties": {
           "role": {
             "enum": [
               "user",
               "assistant"
             ],
-            "title": "Role",
             "type": "string"
           },
           "text": {
-            "title": "Text",
             "type": "string"
           },
           "ts": {
-            "title": "Ts",
             "type": "number"
           }
         },
@@ -2176,30 +1996,26 @@
         "description": "Developer-facing session record for the external (API-key) data-out\nendpoints. Carries only product-agnostic fields \u2014 the workspace and the\nend user are resolved from the credential, never echoed back.\n\nDeliberately outside the ``Realtime*`` namespace: that prefix is swept\ninto the realtime wire-message codegen and the legacy spec, and this is a\nREST response model, not a data-channel frame.",
         "properties": {
           "ended_at": {
-            "title": "Ended At",
             "type": "number"
           },
           "has_resumption_handle": {
-            "title": "Has Resumption Handle",
             "type": "boolean"
           },
           "id": {
             "format": "uuid",
-            "title": "Id",
             "type": "string"
           },
           "provider": {
             "enum": [
               "gemini",
               "openai",
+              "openai_mini",
               "cosmo_voice_personaplex",
               "cosmo_voice_ultravox"
             ],
-            "title": "Provider",
             "type": "string"
           },
           "started_at": {
-            "title": "Started At",
             "type": "number"
           },
           "status": {
@@ -2220,32 +2036,28 @@
         "properties": {
           "audio_wav_base64": {
             "description": "Optional mono WAV recording, base64-encoded.",
-            "title": "Audio Wav Base64",
             "type": "string"
           },
           "ended_at": {
             "description": "Call end time, epoch seconds.",
-            "title": "Ended At",
             "type": "number"
           },
           "provider": {
             "enum": [
               "gemini",
               "openai",
+              "openai_mini",
               "cosmo_voice_personaplex",
               "cosmo_voice_ultravox"
             ],
-            "title": "Provider",
             "type": "string"
           },
           "started_at": {
             "description": "Call start time, epoch seconds.",
-            "title": "Started At",
             "type": "number"
           },
           "title": {
             "description": "Display title for the session.",
-            "title": "Title",
             "type": "string"
           },
           "transcript": {
@@ -2253,7 +2065,6 @@
             "items": {
               "$ref": "#/components/schemas/TranscriptTurn-Input"
             },
-            "title": "Transcript",
             "type": "array"
           }
         },
@@ -2264,22 +2075,19 @@
         "type": "object"
       },
       "VoiceSessionTranscriptTurn": {
-        "description": "One transcript line as written by ``RealtimeSessionLogger.log_transcript``.",
+        "description": "One transcript line: timestamp (epoch seconds), speaker role, and text.",
         "properties": {
           "role": {
             "enum": [
               "user",
               "assistant"
             ],
-            "title": "Role",
             "type": "string"
           },
           "text": {
-            "title": "Text",
             "type": "string"
           },
           "ts": {
-            "title": "Ts",
             "type": "number"
           }
         },
@@ -2296,6 +2104,12 @@
       "ApiKeyAuth": {
         "bearerFormat": "CosmoRealtime API key",
         "description": "Workspace-scoped API key. Pass as ``Authorization: Bearer <key>``. Required scopes are declared per-operation in ``x-required-scopes``.",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "UserTokenAuth": {
+        "bearerFormat": "User access token",
+        "description": "Acts-as-user access token. Pass as ``Authorization: Bearer <token>``. API keys are rejected on operations that require this scheme; the required capability is declared per-operation in ``x-required-capability``.",
         "scheme": "bearer",
         "type": "http"
       }
@@ -2319,6 +2133,15 @@
         "requestBody": {
           "content": {
             "application/json": {
+              "examples": {
+                "mint": {
+                  "summary": "Mint a one-hour token for an end user",
+                  "value": {
+                    "external_user_id": "user-8421@example.com",
+                    "ttl_seconds": 3600
+                  }
+                }
+              },
               "schema": {
                 "$ref": "#/components/schemas/MintTokenRequest"
               }
@@ -2337,6 +2160,24 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Missing or invalid API key. Rejected by the authentication layer, so the body is ``{\"detail\": \"...\"}`` \u2014 not the error envelope."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2345,7 +2186,7 @@
                 }
               }
             },
-            "description": "Rejected \u2014 see error.code (typed rejections) and error.errors (field-level validation)"
+            "description": "Rejected \u2014 see ``error.code`` (typed rejections) and ``error.errors`` (field-level validation). Full rejection-code table: [Session start errors](https://platform.askcosmo.ai/docs/reference/api/session-start#errors)."
           }
         },
         "security": [
@@ -2353,7 +2194,78 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "Mint Project Token",
+        "summary": "Mint an end-user token",
+        "tags": [
+          "external-auth"
+        ],
+        "x-auth-type": "external_api",
+        "x-required-scopes": [
+          "user_tokens:mint"
+        ],
+        "x-workspace-exempt": true
+      }
+    },
+    "/api/v1/external/auth/token/{token_id}": {
+      "delete": {
+        "description": "Revoke one minted end-user token before it expires.\n\n``token_id`` is the id the mint response returned. Revocation takes\neffect on the next request presenting the JWT; it does not end sessions\nalready running. Idempotent \u2014 revoking an already-revoked token succeeds.",
+        "operationId": "revoke_project_token",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token_id",
+            "required": true,
+            "schema": {
+              "title": "Token Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokeTokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Missing or invalid API key. Rejected by the authentication layer, so the body is ``{\"detail\": \"...\"}`` \u2014 not the error envelope."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RealtimeErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rejected \u2014 see ``error.code`` (typed rejections) and ``error.errors`` (field-level validation). Full rejection-code table: [Session start errors](https://platform.askcosmo.ai/docs/reference/api/session-start#errors)."
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "Revoke an end-user token",
         "tags": [
           "external-auth"
         ],
@@ -2366,11 +2278,41 @@
     },
     "/api/v1/external/realtime/session/start": {
       "post": {
-        "description": "Start a session on the resolved-spec flow: the config is resolved\nagainst the caller's workspace into a ``ResolvedSessionSpec`` and\ndispatched; no ``RealtimeClientInit`` translation. A saved agent is\nlaunched by reference (``agent: {type: \"catalog\", name}``) \u2014 resolution\nstamps the session's agent linkage itself, so there is no out-of-band\nattribution channel.",
+        "description": "Start a session from a ``session-config`` body and return the LiveKit\njoin credentials. A saved agent is launched by reference\n(``agent: {type: \"catalog\", name}``) and the session is attributed to it\nautomatically; an ``inline`` agent is defined in the request itself.",
         "operationId": "start_realtime_session",
         "requestBody": {
           "content": {
             "application/json": {
+              "examples": {
+                "catalog_agent": {
+                  "summary": "Launch a saved catalog agent",
+                  "value": {
+                    "agent": {
+                      "name": "support-agent",
+                      "type": "catalog"
+                    },
+                    "type": "session-config",
+                    "version": "1.0"
+                  }
+                },
+                "inline_agent": {
+                  "summary": "Define the agent inline",
+                  "value": {
+                    "agent": {
+                      "instructions": "You are a concise support agent.",
+                      "type": "inline",
+                      "voice": {
+                        "name": "Puck"
+                      }
+                    },
+                    "session": {
+                      "max_session_seconds": 1800
+                    },
+                    "type": "session-config",
+                    "version": "1.0"
+                  }
+                }
+              },
               "schema": {
                 "$ref": "#/components/schemas/RealtimeSessionConfig"
               }
@@ -2389,57 +2331,23 @@
             },
             "description": "Successful Response"
           },
-          "422": {
+          "401": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RealtimeErrorEnvelope"
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ],
+                  "type": "object"
                 }
               }
             },
-            "description": "Rejected \u2014 see error.code (typed rejections) and error.errors (field-level validation)"
-          }
-        },
-        "security": [
-          {
-            "ApiKeyAuth": []
-          }
-        ],
-        "summary": "External Realtime Session Start Resolved Endpoint",
-        "tags": [
-          "external-realtime"
-        ],
-        "x-auth-type": "external_api",
-        "x-required-scopes": [
-          "realtime:use"
-        ],
-        "x-workspace-exempt": true
-      }
-    },
-    "/api/v1/external/realtime/session/start-legacy": {
-      "post": {
-        "deprecated": true,
-        "operationId": "start_realtime_session_legacy",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RealtimeSessionConfig"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RealtimeSessionResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
+            "description": "Missing or invalid API key. Rejected by the authentication layer, so the body is ``{\"detail\": \"...\"}`` \u2014 not the error envelope."
           },
           "422": {
             "content": {
@@ -2449,7 +2357,7 @@
                 }
               }
             },
-            "description": "Rejected \u2014 see error.code (typed rejections) and error.errors (field-level validation)"
+            "description": "Rejected \u2014 see ``error.code`` (typed rejections) and ``error.errors`` (field-level validation). Full rejection-code table: [Session start errors](https://platform.askcosmo.ai/docs/reference/api/session-start#errors)."
           }
         },
         "security": [
@@ -2457,7 +2365,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "External Realtime Session Start Endpoint",
+        "summary": "Start a realtime session",
         "tags": [
           "external-realtime"
         ],
@@ -2505,6 +2413,24 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Missing or invalid API key. Rejected by the authentication layer, so the body is ``{\"detail\": \"...\"}`` \u2014 not the error envelope."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2513,7 +2439,7 @@
                 }
               }
             },
-            "description": "Rejected \u2014 see error.code (typed rejections) and error.errors (field-level validation)"
+            "description": "Rejected \u2014 see ``error.code`` (typed rejections) and ``error.errors`` (field-level validation). Full rejection-code table: [Session start errors](https://platform.askcosmo.ai/docs/reference/api/session-start#errors)."
           }
         },
         "security": [
@@ -2521,7 +2447,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "External Realtime Session Dial Endpoint",
+        "summary": "Dial out from a session",
         "tags": [
           "external-realtime"
         ],
@@ -2546,6 +2472,24 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Missing or invalid API key. Rejected by the authentication layer, so the body is ``{\"detail\": \"...\"}`` \u2014 not the error envelope."
           }
         },
         "security": [
@@ -2553,7 +2497,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "External Realtime Verify Endpoint",
+        "summary": "Verify a realtime credential",
         "tags": [
           "external-realtime"
         ],
@@ -2602,6 +2546,24 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Missing or invalid API key. Rejected by the authentication layer, so the body is ``{\"detail\": \"...\"}`` \u2014 not the error envelope."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2610,7 +2572,7 @@
                 }
               }
             },
-            "description": "Rejected \u2014 see error.code (typed rejections) and error.errors (field-level validation)"
+            "description": "Rejected \u2014 see ``error.code`` (typed rejections) and ``error.errors`` (field-level validation). Full rejection-code table: [Session start errors](https://platform.askcosmo.ai/docs/reference/api/session-start#errors)."
           }
         },
         "security": [
@@ -2618,7 +2580,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "External List Voice Sessions",
+        "summary": "List voice sessions",
         "tags": [
           "external-voice-sessions"
         ],
@@ -2631,7 +2593,7 @@
     },
     "/api/v1/external/voice-sessions/capabilities": {
       "get": {
-        "description": "Report which realtime model providers the caller may select.\n\nThe Mac app hides its provider picker when the workspace is not\nOpenAI-eligible \u2014 a picker the server would silently override is\nworse than no picker. Declared before ``/{session_id}`` so the\nliteral path is matched ahead of the UUID path parameter.",
+        "description": "Report which realtime model providers the caller may select.\n\nA provider reported unavailable is overridden server-side if requested,\nso clients can use this to hide options that would not take effect.",
         "operationId": "get_realtime_capabilities",
         "responses": {
           "200": {
@@ -2643,6 +2605,24 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Missing or invalid API key. Rejected by the authentication layer, so the body is ``{\"detail\": \"...\"}`` \u2014 not the error envelope."
           }
         },
         "security": [
@@ -2650,7 +2630,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "External Realtime Capabilities",
+        "summary": "Get provider capabilities",
         "tags": [
           "external-voice-sessions"
         ],
@@ -2663,7 +2643,7 @@
     },
     "/api/v1/external/voice-sessions/import": {
       "post": {
-        "description": "Import a recording bundle as a COMPLETED voice session (API-only).\n\nWrites the transcript (and optional mono WAV) to the canonical GCS layout\nand inserts a COMPLETED row, so the session reads back through the same\nlist/get/transcript endpoints and the recordings dashboard. Requires the\n``recordings:write`` capability plus recordings-admin \u2014 the role that also\nbridges ``realtime:use``, so the importer can read the session back (voice\nreads are admin-only). Declared before ``/{session_id}`` so the literal\npath wins over the UUID parameter.",
+        "description": "Import a recording bundle as a COMPLETED voice session.\n\nStores the transcript (and optional mono WAV) and creates a COMPLETED\nsession, so the import reads back through the same list/get/transcript\nendpoints. Requires the ``recordings:write`` capability plus\nrecordings-admin, which also grants ``realtime:use`` so the importer can\nread the session back.",
         "operationId": "import_voice_session",
         "requestBody": {
           "content": {
@@ -2686,6 +2666,24 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Missing or invalid access token. Rejected by the authentication layer, so the body is ``{\"detail\": \"...\"}`` \u2014 not the error envelope."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2694,18 +2692,21 @@
                 }
               }
             },
-            "description": "Rejected \u2014 see error.code (typed rejections) and error.errors (field-level validation)"
+            "description": "Rejected \u2014 see ``error.code`` (typed rejections) and ``error.errors`` (field-level validation). Full rejection-code table: [Session start errors](https://platform.askcosmo.ai/docs/reference/api/session-start#errors)."
           }
         },
         "security": [
           {
-            "ApiKeyAuth": []
+            "UserTokenAuth": []
           }
         ],
-        "summary": "External Import Voice Session",
+        "summary": "Import a voice session",
         "tags": [
           "external-voice-sessions"
-        ]
+        ],
+        "x-auth-type": "external_user",
+        "x-required-capability": "recordings:write",
+        "x-workspace-exempt": true
       }
     },
     "/api/v1/external/voice-sessions/{session_id}": {
@@ -2727,6 +2728,24 @@
           "204": {
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Missing or invalid API key. Rejected by the authentication layer, so the body is ``{\"detail\": \"...\"}`` \u2014 not the error envelope."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2735,7 +2754,7 @@
                 }
               }
             },
-            "description": "Rejected \u2014 see error.code (typed rejections) and error.errors (field-level validation)"
+            "description": "Rejected \u2014 see ``error.code`` (typed rejections) and ``error.errors`` (field-level validation). Full rejection-code table: [Session start errors](https://platform.askcosmo.ai/docs/reference/api/session-start#errors)."
           }
         },
         "security": [
@@ -2743,7 +2762,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "External Delete Voice Session",
+        "summary": "Delete a voice session",
         "tags": [
           "external-voice-sessions"
         ],
@@ -2778,6 +2797,24 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Missing or invalid API key. Rejected by the authentication layer, so the body is ``{\"detail\": \"...\"}`` \u2014 not the error envelope."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2786,7 +2823,7 @@
                 }
               }
             },
-            "description": "Rejected \u2014 see error.code (typed rejections) and error.errors (field-level validation)"
+            "description": "Rejected \u2014 see ``error.code`` (typed rejections) and ``error.errors`` (field-level validation). Full rejection-code table: [Session start errors](https://platform.askcosmo.ai/docs/reference/api/session-start#errors)."
           }
         },
         "security": [
@@ -2794,7 +2831,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "External Get Voice Session",
+        "summary": "Get a voice session",
         "tags": [
           "external-voice-sessions"
         ],
@@ -2835,6 +2872,24 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Missing or invalid API key. Rejected by the authentication layer, so the body is ``{\"detail\": \"...\"}`` \u2014 not the error envelope."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2843,7 +2898,7 @@
                 }
               }
             },
-            "description": "Rejected \u2014 see error.code (typed rejections) and error.errors (field-level validation)"
+            "description": "Rejected \u2014 see ``error.code`` (typed rejections) and ``error.errors`` (field-level validation). Full rejection-code table: [Session start errors](https://platform.askcosmo.ai/docs/reference/api/session-start#errors)."
           }
         },
         "security": [
@@ -2851,7 +2906,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "External Get Voice Session Transcript",
+        "summary": "Get a session transcript",
         "tags": [
           "external-voice-sessions"
         ],
@@ -2873,6 +2928,23 @@
           "description": "API host for your deployment."
         }
       }
+    }
+  ],
+  "tags": [
+    {
+      "description": "Start realtime sessions, dial outbound calls, and verify credentials.",
+      "name": "external-realtime",
+      "x-displayName": "Realtime"
+    },
+    {
+      "description": "Read back and manage recorded voice sessions.",
+      "name": "external-voice-sessions",
+      "x-displayName": "Voice sessions"
+    },
+    {
+      "description": "Mint and revoke project-scoped end-user tokens.",
+      "name": "external-auth",
+      "x-displayName": "Auth"
     }
   ]
 }

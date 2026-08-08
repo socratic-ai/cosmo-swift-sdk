@@ -29,7 +29,7 @@ struct MiddlewareTests {
 
     @Test("BearerAuthMiddleware adds Authorization header when absent")
     func bearerAddsHeader() async throws {
-        let middleware = BearerAuthMiddleware(bearerToken: "abc123")
+        let middleware = BearerAuthMiddleware(credential: .apiKey("abc123"))
         let request = makeRequest()
 
         var captured: HTTPRequest?
@@ -48,7 +48,7 @@ struct MiddlewareTests {
 
     @Test("BearerAuthMiddleware overwrites an existing Authorization header")
     func bearerOverwritesHeader() async throws {
-        let middleware = BearerAuthMiddleware(bearerToken: "new-key")
+        let middleware = BearerAuthMiddleware(credential: .apiKey("new-key"))
         var headers = HTTPFields()
         headers[.authorization] = "Bearer stale-key"
         let request = makeRequest(headers: headers)
@@ -69,7 +69,7 @@ struct MiddlewareTests {
 
     @Test("BearerAuthMiddleware passes through body, baseURL, and does not mutate method/path")
     func bearerPassesThroughContext() async throws {
-        let middleware = BearerAuthMiddleware(bearerToken: "abc123")
+        let middleware = BearerAuthMiddleware(credential: .apiKey("abc123"))
         let request = makeRequest()
         let bodyBytes = "hello".data(using: .utf8)!
         let body: HTTPBody? = HTTPBody(bodyBytes)
@@ -103,7 +103,7 @@ struct MiddlewareTests {
 
     @Test("BearerAuthMiddleware returns the response from next unchanged")
     func bearerReturnsNextResponse() async throws {
-        let middleware = BearerAuthMiddleware(bearerToken: "abc123")
+        let middleware = BearerAuthMiddleware(credential: .apiKey("abc123"))
         let request = makeRequest()
         let responseBodyBytes = "pong".data(using: .utf8)!
         let expectedBody: HTTPBody? = HTTPBody(responseBodyBytes)
@@ -130,7 +130,33 @@ struct MiddlewareTests {
         ]
     )
     func bearerEmitsValueForBothCredentialForms(token: String) async throws {
-        let middleware = BearerAuthMiddleware(bearerToken: token)
+        for credential in [
+            RealtimeSession.Options.Credential.apiKey(token), .token(token),
+        ] {
+            let middleware = BearerAuthMiddleware(credential: credential)
+            let request = makeRequest()
+
+            var captured: HTTPRequest?
+            _ = try await middleware.intercept(
+                request,
+                body: nil,
+                baseURL: Self.baseURL,
+                operationID: "op"
+            ) { req, _, _ in
+                captured = req
+                return (HTTPResponse(status: .ok), nil)
+            }
+
+            #expect(captured?.headerFields[.authorization] == "Bearer \(token)")
+        }
+    }
+
+    @Test("BearerAuthMiddleware resolves a token-source credential's JWT per request")
+    func bearerResolvesTokenSource() async throws {
+        let source = TokenSource.custom {
+            MintedToken(jwt: "fetched-jwt", expiresAt: Date().addingTimeInterval(3600))
+        }
+        let middleware = BearerAuthMiddleware(credential: .tokenSource(source))
         let request = makeRequest()
 
         var captured: HTTPRequest?
@@ -144,18 +170,38 @@ struct MiddlewareTests {
             return (HTTPResponse(status: .ok), nil)
         }
 
-        #expect(captured?.headerFields[.authorization] == "Bearer \(token)")
+        #expect(captured?.headerFields[.authorization] == "Bearer fetched-jwt")
+    }
+
+    @Test("BearerAuthMiddleware surfaces a token-source fetch failure before next runs")
+    func bearerPropagatesTokenSourceFailure() async throws {
+        struct FetchFailed: Error, Equatable {}
+        let source = TokenSource.custom { throw FetchFailed() }
+        let middleware = BearerAuthMiddleware(credential: .tokenSource(source))
+        let request = makeRequest()
+
+        await #expect(throws: FetchFailed.self) {
+            _ = try await middleware.intercept(
+                request,
+                body: nil,
+                baseURL: Self.baseURL,
+                operationID: "op"
+            ) { _, _, _ in
+                Issue.record("next must not run when the credential fetch fails")
+                return (HTTPResponse(status: .ok), nil)
+            }
+        }
     }
 
     @Test("BearerAuthMiddleware writes a 'Bearer' header even with empty token (current behavior)")
     func bearerEmptyKeyStillWritesHeader() async throws {
         // Current behavior: the middleware unconditionally interpolates
-        // the value into ``Bearer \(bearerToken)`` — empty value included.
+        // the resolved bearer value — empty value included.
         // The ``HTTPFields`` setter trims trailing whitespace, so the
         // observed header value is ``Bearer`` (no trailing space). The
         // backend will reject the request — middleware does not
         // pre-validate.
-        let middleware = BearerAuthMiddleware(bearerToken: "")
+        let middleware = BearerAuthMiddleware(credential: .apiKey(""))
         let request = makeRequest()
 
         var captured: HTTPRequest?
@@ -180,7 +226,7 @@ struct MiddlewareTests {
     @Test("BearerAuthMiddleware propagates errors thrown by next")
     func bearerPropagatesNextErrors() async throws {
         struct Boom: Error, Equatable {}
-        let middleware = BearerAuthMiddleware(bearerToken: "abc123")
+        let middleware = BearerAuthMiddleware(credential: .apiKey("abc123"))
         let request = makeRequest()
 
         await #expect(throws: Boom.self) {

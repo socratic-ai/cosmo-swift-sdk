@@ -40,16 +40,52 @@ struct SessionOptionsTests {
         #expect(RealtimeSession.Options(apiKey: "k").baseURL == RealtimeBaseURL.resolve())
     }
 
-    @Test("bearerValue returns the underlying secret for each case")
-    func bearerValueUnwraps() {
-        #expect(RealtimeSession.Options.Credential.apiKey("k").bearerValue == "k")
-        #expect(RealtimeSession.Options.Credential.token("jwt").bearerValue == "jwt")
+    @Test("init(tokenSource:) yields a tokenSource credential that cannot mint")
+    func tokenSourceCredential() {
+        let source = TokenSource.custom {
+            MintedToken(jwt: "jwt", expiresAt: Date().addingTimeInterval(3600))
+        }
+        let options = RealtimeSession.Options(tokenSource: source)
+        #expect(options.credential == .tokenSource(source))
+        #expect(options.canMint == false)
+    }
+
+    @Test("bearerToken returns the underlying secret for each case")
+    func bearerTokenUnwraps() async throws {
+        #expect(try await RealtimeSession.Options.Credential.apiKey("k").bearerToken() == "k")
+        #expect(try await RealtimeSession.Options.Credential.token("jwt").bearerToken() == "jwt")
+        let source = TokenSource.custom {
+            MintedToken(jwt: "fetched-jwt", expiresAt: Date().addingTimeInterval(3600))
+        }
+        #expect(
+            try await RealtimeSession.Options.Credential.tokenSource(source).bearerToken()
+                == "fetched-jwt"
+        )
+    }
+
+    @Test("tokenSource credentials are equal by source identity, not configuration")
+    func tokenSourceEquality() {
+        let fetch: @Sendable () async throws -> MintedToken = {
+            MintedToken(jwt: "jwt", expiresAt: Date().addingTimeInterval(3600))
+        }
+        let source = TokenSource.custom(fetch)
+        let other = TokenSource.custom(fetch)
+        #expect(
+            RealtimeSession.Options.Credential.tokenSource(source) == .tokenSource(source)
+        )
+        #expect(
+            RealtimeSession.Options.Credential.tokenSource(source) != .tokenSource(other)
+        )
+        #expect(RealtimeSession.Options.Credential.tokenSource(source) != .token("jwt"))
     }
 
     @Test("description and debugDescription mask the secret")
     func credentialMasksSecret() {
         let key = RealtimeSession.Options.Credential.apiKey("super-secret-key")
         let token = RealtimeSession.Options.Credential.token("super-secret-jwt")
+        let source = RealtimeSession.Options.Credential.tokenSource(
+            .custom { MintedToken(jwt: "jwt", expiresAt: Date()) }
+        )
 
         for rendered in [key.description, key.debugDescription] {
             #expect(!rendered.contains("super-secret-key"))
@@ -58,6 +94,9 @@ struct SessionOptionsTests {
         for rendered in [token.description, token.debugDescription] {
             #expect(!rendered.contains("super-secret-jwt"))
             #expect(rendered == "Credential.token(•••)")
+        }
+        for rendered in [source.description, source.debugDescription] {
+            #expect(rendered == "Credential.tokenSource(•••)")
         }
     }
 

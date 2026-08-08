@@ -3,10 +3,15 @@ import Foundation
 import OpenAPIRuntime
 import OpenAPIURLSession
 
-/// A client for the external realtime API: mint end-user tokens, start
-/// sessions, and read back voice-session data. Mirrors the Python
+/// A client for the external realtime API: start sessions, preflight the
+/// credential, and read back voice-session data. Mirrors the Python
 /// ``CosmoRealtime`` client. Construct once with your
-/// ``RealtimeSession/Options``; reuse across mints and sessions.
+/// ``RealtimeSession/Options``; reuse across calls and sessions.
+///
+/// Minting end-user tokens is the one capability deliberately not here: a
+/// shipped device app must never mint. The server-side
+/// ``mintToken(externalUserId:)`` extension ships in the opt-in
+/// `CosmoRealtimeMint` product.
 public struct RealtimeClient: Sendable {
     private let options: RealtimeSession.Options
     private let transport: any ClientTransport
@@ -20,48 +25,14 @@ public struct RealtimeClient: Sendable {
         self.transport = transport
     }
 
-    /// Mint a short-lived per-user JWT for `externalUserId` (POST auth/token).
-    /// Run this server-side with an api-key credential; hand the returned
-    /// ``MintedToken/jwt`` to the end user's device, which constructs
-    /// ``RealtimeSession/Options`` and starts a session. Idempotent per
-    /// `(workspace, externalUserId)` — the same external user maps to the same
-    /// auto-provisioned project on repeat calls.
-    ///
-    /// Throws ``MintTokenError`` if the server rejects the request, the
-    /// transport fails, or the response body cannot be decoded.
-    public func mintToken(externalUserId: String) async throws -> MintedToken {
-        let output = try await _run(as: MintTokenError.self) {
-            try await _mint(externalUserId: externalUserId)
-        }
-        switch output {
-        case .ok(let ok):
-            let response = try ok.body.json
-            return MintedToken(jwt: response.jwt, expiresAt: response.expiresAt)
-        case .unprocessableContent(let err):
-            throw Self._rejected(as: MintTokenError.self, try? err.body.json)
-        case .undocumented(let statusCode, let payload):
-            throw await Self._undocumented(as: MintTokenError.self, statusCode, payload)
-        }
-    }
-
     /// Start a session with this client's options — convenience over
     /// ``RealtimeSession/start(_:config:)``.
     public func start(config: SessionConfig = SessionConfig()) async throws -> RealtimeSession {
         try await RealtimeSession.start(options, config: config)
     }
 
-    /// The single generated mint call. Isolated so an operationId cleanup that
-    /// renames the method is a one-line change.
-    private func _mint(
-        externalUserId: String
-    ) async throws -> CosmoRealtimeAPI.Operations.MintProjectToken.Output {
-        try await _apiClient().mintProjectToken(
-            body: .json(.init(externalUserId: externalUserId))
-        )
-    }
-
     /// The generated client bound to this client's server and credential.
-    func _apiClient() -> CosmoRealtimeAPI.Client {
+    package func _apiClient() -> CosmoRealtimeAPI.Client {
         CosmoRealtimeAPI.Client(
             serverURL: options.baseURL,
             transport: transport,
@@ -89,14 +60,27 @@ public struct RealtimeClient: Sendable {
 
 }
 
-/// A short-lived per-user JWT minted via ``RealtimeClient/mintToken(externalUserId:)``.
+/// A short-lived per-user JWT — minted server-side (the `CosmoRealtimeMint`
+/// product's `mintToken(externalUserId:)`) or fetched by a ``TokenSource``.
 public struct MintedToken: Sendable, Equatable {
     public let jwt: String
     public let expiresAt: Date
+    /// Server-side revocation handle (``DELETE auth/token/{token_id}``) —
+    /// keep it on your server; the device only needs ``jwt``. Cosmo always
+    /// returns it; it is optional here because this type doubles as the
+    /// ``TokenSource`` cached shape, whose contract is any backend
+    /// returning ``{ jwt, expires_at }``.
+    public let tokenId: String?
+
+    public init(jwt: String, expiresAt: Date, tokenId: String? = nil) {
+        self.jwt = jwt
+        self.expiresAt = expiresAt
+        self.tokenId = tokenId
+    }
 }
 
-/// A dedicated error type for ``RealtimeClient/mintToken(externalUserId:)``,
-/// mirroring the Python SDK's ``MintTokenError``.
+/// A dedicated error type for the mint call and for ``TokenSource``
+/// fetches, mirroring the Python SDK's ``MintTokenError``.
 public enum MintTokenError: Error, LocalizedError, Equatable {
     /// The server refused the request (HTTP ≥ 400). ``code`` is the protocol
     /// error slug when the rejection carried one.

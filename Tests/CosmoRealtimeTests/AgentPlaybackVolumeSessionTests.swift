@@ -3,7 +3,7 @@ import Testing
 @testable import CosmoRealtime
 
 /// Agent playback-gain control on the external-protocol stack.
-/// `RealtimeSession`/`VoiceSession` forward to the transport, which owns the
+/// `RealtimeSession` forwards to the transport, which owns the
 /// clamp + stored desired gain (re-applied to a track that attaches later).
 /// These drive the public `RealtimeSession.setAgentPlaybackVolume` against a
 /// real ``LiveKitSessionTransport`` and assert the stored gain — no LiveKit

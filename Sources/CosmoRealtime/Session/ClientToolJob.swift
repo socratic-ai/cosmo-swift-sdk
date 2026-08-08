@@ -19,7 +19,7 @@ private let maxTerminalResultBytes = 8 * 1024
 // message — per-field caps alone can't, since JSON escaping inflates capped
 // text past the packet budget.
 private let maxJobMessageBytes = 12 * 1024
-private let terminalTruncationSuffix = "… [truncated]"
+private let terminalTruncationSuffix = ClientToolReply.truncationSuffix
 
 func shrinkTerminalText(_ text: String?, keep: Int) -> String? {
     guard let text, text.count > keep else { return text }

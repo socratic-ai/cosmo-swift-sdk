@@ -1,3 +1,4 @@
+import CosmoRealtimeMint
 import Foundation
 import HTTPTypes
 import OpenAPIRuntime
@@ -11,7 +12,7 @@ struct MintTokenTests {
 
     @Test("a 200 maps to a MintedToken with the parsed jwt and expiry")
     func okMapsToMintedToken() async throws {
-        let body = #"{"jwt":"end-user-jwt","expires_at":"2026-06-24T10:00:00Z"}"#
+        let body = #"{"jwt":"end-user-jwt","expires_at":"2026-06-24T10:00:00Z","token_id":"tok-1"}"#
         let transport = StubTransport {
             (HTTPResponse(status: .ok), HTTPBody(body))
         }
@@ -25,6 +26,19 @@ struct MintTokenTests {
         components.timeZone = TimeZone(identifier: "UTC")
         let expected = Calendar(identifier: .gregorian).date(from: components)
         #expect(token.expiresAt == expected)
+        #expect(token.tokenId == "tok-1")
+    }
+
+    @Test("an auth-layer 401 maps to MintTokenError.rejected carrying the detail, with no code")
+    func unauthorizedMapsToRejected() async {
+        let body = #"{"detail":"Invalid API key"}"#
+        let transport = StubTransport { jsonResponse(.unauthorized, body) }
+        await #expect {
+            _ = try await makeStubClient(transport).mintToken(externalUserId: "user-42")
+        } throws: { error in
+            guard case .rejected(let code, let detail) = error as? MintTokenError else { return false }
+            return code == nil && detail == "Invalid API key"
+        }
     }
 
     @Test("an undocumented 4xx maps to MintTokenError.rejected with the parsed code/detail")
@@ -99,41 +113,5 @@ struct MintTokenTests {
             guard case .transport(let message) = error as? MintTokenError else { return false }
             return !message.isEmpty
         }
-    }
-
-    @Test("mintToken carries the client identity headers through the generated client")
-    func mintTokenSendsClientIdentity() async throws {
-        let capturedRequest = OSAllocatedUnfairLock<HTTPRequest?>(initialState: nil)
-        let body = #"{"jwt":"end-user-jwt","expires_at":"2026-06-24T10:00:00Z"}"#
-        let transport = StubTransport(onRequest: { request in
-            capturedRequest.withLock { $0 = request }
-        }) {
-            (HTTPResponse(status: .ok), HTTPBody(body))
-        }
-        let options = RealtimeSession.Options(
-            apiKey: "sk-test",
-            clientIdentity: ClientIdentity(client: "cosmo-mac", marketingVersion: "1.0.0", build: "42")
-        )
-        _ = try await makeStubClient(transport, options: options).mintToken(externalUserId: "user-42")
-        let request = try #require(capturedRequest.withLock { $0 })
-        #expect(request.headerFields[HTTPField.Name("X-Cosmo-Client")!] == "cosmo-mac")
-        #expect(request.headerFields[HTTPField.Name("X-Cosmo-Client-Version")!] == "1.0.0")
-        #expect(request.headerFields[HTTPField.Name("X-Cosmo-Client-Build")!] == "42")
-    }
-
-    @Test("mintToken sends no client headers when no identity is set")
-    func mintTokenWithoutClientIdentity() async throws {
-        let capturedRequest = OSAllocatedUnfairLock<HTTPRequest?>(initialState: nil)
-        let body = #"{"jwt":"end-user-jwt","expires_at":"2026-06-24T10:00:00Z"}"#
-        let transport = StubTransport(onRequest: { request in
-            capturedRequest.withLock { $0 = request }
-        }) {
-            (HTTPResponse(status: .ok), HTTPBody(body))
-        }
-        _ = try await makeStubClient(transport).mintToken(externalUserId: "user-42")
-        let request = try #require(capturedRequest.withLock { $0 })
-        #expect(request.headerFields[HTTPField.Name("X-Cosmo-Client")!] == nil)
-        #expect(request.headerFields[HTTPField.Name("X-Cosmo-Client-Version")!] == nil)
-        #expect(request.headerFields[HTTPField.Name("X-Cosmo-Client-Build")!] == nil)
     }
 }

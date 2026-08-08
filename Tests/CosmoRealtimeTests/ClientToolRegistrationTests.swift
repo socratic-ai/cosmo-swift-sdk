@@ -66,55 +66,6 @@ struct ClientToolRegistrationTests {
         #expect(registered.isEmpty)
     }
 
-    @Test("declared desktop tools advertise as .client specs, never server-side")
-    func declaredToolsMapToClientNotPlatform() throws {
-        let declared = [
-            DeclaredClientTool(name: "accessibility_tree", description: "reads the AX tree",
-                               parametersJSON: #"{"type":"object"}"#),
-            DeclaredClientTool(name: "type_text", description: "types text",
-                               parametersJSON: #"{"type":"object"}"#),
-        ]
-        let specs = try VoiceSession.makeTools(declared: declared, background: nil) ?? []
-
-        // Every declared tool becomes a .client spec — the desktop toolset is
-        // client-executed; server tools are their own typed opt-ins, which
-        // ``makeTools`` never synthesizes from a declaration.
-        #expect(specs.count == 2)
-        let clientNames = specs.compactMap { spec -> String? in
-            if case let .client(name, _, _, _) = spec { return name }
-            return nil
-        }
-        #expect(Set(clientNames) == ["accessibility_tree", "type_text"])
-    }
-
-    @Test("a declared tool with a background handler advertises as .backgroundClient")
-    func declaredToolWithBackgroundHandlerMapsToBackgroundClient() throws {
-        let declared = [
-            DeclaredClientTool(name: "delegate_local", description: "hand off a coding task",
-                               parametersJSON: #"{"type":"object"}"#),
-            DeclaredClientTool(name: "type_text", description: "types text",
-                               parametersJSON: #"{"type":"object"}"#),
-        ]
-        let background: [String: BackgroundClientToolHandler] = [
-            "delegate_local": { _, job in await job.ack() }
-        ]
-        let specs = try VoiceSession.makeTools(declared: declared, background: background) ?? []
-
-        // The named tool becomes a .backgroundClient spec (deferred path); the
-        // rest stay plain .client specs dispatched synchronously.
-        #expect(specs.count == 2)
-        let backgroundNames = specs.compactMap { spec -> String? in
-            if case let .backgroundClient(name, _, _, _) = spec { return name }
-            return nil
-        }
-        let clientNames = specs.compactMap { spec -> String? in
-            if case let .client(name, _, _, _) = spec { return name }
-            return nil
-        }
-        #expect(backgroundNames == ["delegate_local"])
-        #expect(clientNames == ["type_text"])
-    }
-
     /// Pull `agent.tools[].name` out of the serialized ``session-config`` frame
     /// without depending on the generated wire types.
     private static func advertisedToolKinds(_ frame: Data) -> Set<String> {

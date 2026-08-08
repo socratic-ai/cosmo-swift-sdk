@@ -19,13 +19,10 @@ public enum ConnectGreeting {
     }
 
     /// First-turn directive for hosts that open with a text turn instead of the
-    /// config greeting (iOS, #8789), where the model composes the line rather
+    /// config greeting (iOS), where the model composes the line rather
     /// than reciting it.
     public static let instruction: String =
         "Greet in 2-4 words, naming yourself Cosmo — like \"Cosmo here!\" or \"Hey, it's Cosmo.\" Then stop and wait."
-
-    @available(*, deprecated, renamed: "instruction")
-    public static let base: String = instruction
 
     /// How the model should use the user's name, for ``SessionConfig/speakingStyle``
     /// — the server appends it to whatever persona it built, so it needs no
@@ -33,7 +30,7 @@ public enum ConnectGreeting {
     /// config. The name rides here rather than the opening line because it
     /// governs every turn, and the opening line is spoken verbatim.
     ///
-    /// A dictation session is never given the name at all (#9407): it types
+    /// A dictation session is never given the name at all: it types
     /// what it hears, so the name has nothing to do there and the boundary
     /// clause below only steers. Withholding it keeps that surface name-free
     /// by construction rather than by prompt.
@@ -43,7 +40,7 @@ public enum ConnectGreeting {
     /// ("Sure, Utkarsh!" every turn). Scoping it to spoken replies is too —
     /// without the boundary the model interpolates the name into text it types
     /// or dictates into the user's apps via the conversational dictate tools.
-    static func nameDirective(userDisplayName: String?, dictation: Bool) -> String? {
+    public static func nameDirective(userDisplayName: String?, dictation: Bool) -> String? {
         guard !dictation, let name = usableName(userDisplayName) else { return nil }
         return """
         The user's name is "\(name)". Address them by name occasionally in \

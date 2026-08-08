@@ -9,23 +9,10 @@ let package = Package(
     ],
     products: [
         .library(name: "CosmoRealtime", targets: ["CosmoRealtime"]),
-        // The iOS on-device tool library any CosmoRealtime app can advertise +
-        // run — the SDK analog of the macOS app's RealtimeMacTools (the platform
-        // + Tools intent rides in the module name, like that target). Vision is
-        // the first tool family. Kept separate from the OpenAPI-generated
-        // transport target so Apple frameworks stay out of it and the dep is
-        // opt-in.
-        .library(name: "CosmoRealtimeiOSTools", targets: ["CosmoRealtimeiOSTools"]),
-        // The opt-in ARKit face-tracking backend — a peer of the Vision toolbox,
-        // not nested in it, so the heavy TrueDepth-only framework stays opt-in.
-        // The pure FaceAnchorSnapshot/ARFaceGeometryProjector compile everywhere
-        // (CI tests them); only the live source is #if os(iOS)-gated.
-        .library(name: "CosmoRealtimeARKit", targets: ["CosmoRealtimeARKit"]),
-        // On-device session notes: data model, file store, search, the
-        // client-declared note tool pack, and the end-of-session recapper.
-        // Depends only on CosmoRealtime (no Apple-app frameworks) so any
-        // CosmoRealtime app can opt in.
-        .library(name: "CosmoNotesKit", targets: ["CosmoNotesKit"]),
+        // The server-side mint capability (``RealtimeClient.mintToken``),
+        // opt-in on purpose: the realistic device consumer must never mint,
+        // so a plain ``import CosmoRealtime`` doesn't see the method.
+        .library(name: "CosmoRealtimeMint", targets: ["CosmoRealtimeMint"]),
     ],
     dependencies: [
         .package(
@@ -44,19 +31,15 @@ let package = Package(
             url: "https://github.com/livekit/client-sdk-swift.git",
             // Floor 2.15.2: 2.15.1's #1044 wraps the SDK's ObjC auto-async
             // bridging in explicit checked continuations — the crash shape of
-            // the macOS 26.1 first-mic-publish SIGSEGV (cosmo #6932, upstream
+            // the macOS 26.1 first-mic-publish SIGSEGV (upstream
             // #1016). Earlier 2.x can resume a continuation against a freed
             // publication there.
             from: "2.15.2"
         ),
     ],
     targets: [
-        // Generated models + client for the published developer API
-        // (``../external-openapi.json``). Separate module because its
-        // generated ``Components`` namespace shares schema names with the
-        // legacy spec generated into ``CosmoRealtime`` below; the two
-        // coexist until the legacy surface is retired. Implementation
-        // detail — consumers import ``CosmoRealtime`` only.
+        // Generated models + client for the published developer API.
+        // Implementation detail — consumers import ``CosmoRealtime`` only.
         .target(
             name: "CosmoRealtimeAPI",
             dependencies: [
@@ -77,43 +60,26 @@ let package = Package(
             ]
         ),
         .target(
-            name: "CosmoRealtimeiOSTools",
-            dependencies: ["CosmoRealtime"]
-        ),
-        .target(
-            name: "CosmoRealtimeARKit",
-            dependencies: ["CosmoRealtime"]
-        ),
-        .target(
-            name: "CosmoNotesKit",
-            dependencies: ["CosmoRealtime"]
+            name: "CosmoRealtimeMint",
+            dependencies: [
+                "CosmoRealtime",
+                "CosmoRealtimeAPI",
+                .product(name: "OpenAPIRuntime", package: "swift-openapi-runtime"),
+            ]
         ),
         .testTarget(
             name: "CosmoRealtimeTests",
             dependencies: [
                 "CosmoRealtime",
+                "CosmoRealtimeMint",
                 .product(name: "LiveKit", package: "client-sdk-swift"),
             ]
-        ),
-        .testTarget(
-            name: "CosmoRealtimeiOSToolsTests",
-            dependencies: ["CosmoRealtimeiOSTools"],
-            resources: [.copy("Fixtures")]
-        ),
-        .testTarget(
-            name: "CosmoRealtimeARKitTests",
-            dependencies: ["CosmoRealtimeARKit"]
-        ),
-        .testTarget(
-            name: "CosmoNotesKitTests",
-            dependencies: ["CosmoNotesKit"]
         ),
         // E2E tests that run against a real ``livekit-server`` in dev
         // mode. Skipped unless ``LIVEKIT_TESTING_URL`` is set in the
         // environment. To run locally:
         //
-        //   docker compose -f docker-compose.livekit.yml up -d   (monorepo backend, scripts/ dir)
-        //   cd sdks/cosmo-realtime/swift
+        //   livekit-server --dev   (any local LiveKit server in dev mode)
         //   LIVEKIT_TESTING_URL=ws://localhost:7880 \
         //     LIVEKIT_TESTING_API_KEY=devkey \
         //     LIVEKIT_TESTING_API_SECRET=devsecretdevsecretdevsecretdevse \

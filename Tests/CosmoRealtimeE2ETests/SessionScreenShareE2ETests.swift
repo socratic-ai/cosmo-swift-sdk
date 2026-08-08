@@ -5,10 +5,10 @@ import LiveKit
 import Testing
 @testable import CosmoRealtime
 
-/// Screen-share publish path on the new ``LiveKitSessionTransport``
-/// against a real ``livekit-server`` in dev mode. Mirrors the legacy
-/// ``ScreenShareE2ETests``. Skipped unless ``LIVEKIT_TESTING_URL`` is
-/// set; this suite does not run in the offline build.
+/// Screen-share publish path on ``LiveKitSessionTransport``
+/// against a real ``livekit-server`` in dev mode. Skipped unless
+/// ``LIVEKIT_TESTING_URL`` is set; this suite does not run in the
+/// offline build.
 // Serialized: every test connects one or more real rooms to the shared dev
 // livekit-server. Run in parallel (swift-testing's default), the simultaneous
 // connects storm the server and intermittently time out (LiveKit code 101).
@@ -263,17 +263,14 @@ struct SessionScreenShareE2ETests {
         await subscriber._disconnectRoomForTest()
     }
 
-    @Test("overlapping agent-audio republish disables the stale publication's stats on unsubscribe")
-    func agentAudioOverlappingRepublishCleansUpStalePublication() async throws {
-        // Codex's escalation: if the agent publishes a NEW audio track before
-        // the OLD one unsubscribes, the output tap moves to the new track but
-        // the old track still has QoE stats armed. Its later unsubscribe must
-        // still disable them — cleanup is keyed on the per-publication
-        // stats-enabled set, not the single tap slot. Drive two concurrent
-        // agent-audio publications, unpublish the first (no longer the current
-        // tap), and assert its SID drops from the stats set while the second
-        // remains. Fails against a single-slot handler that only cleans up the
-        // current tap; passes against the SID-set handler.
+    @Test("a stale agent-audio unsubscribe leaves the republished track's tap attached")
+    func agentAudioOverlappingRepublishKeepsCurrentTap() async throws {
+        // Overlapping republish: the agent publishes a NEW audio track before
+        // the OLD one unsubscribes, so the output tap moves to the new track.
+        // The old publication's later unsubscribe must NOT tear down the tap
+        // that has already moved on — cleanup is keyed on publication SID, so
+        // a stale SID is a no-op. Fails against a handler that detaches the
+        // single tap slot unconditionally.
         let fixture = try E2EFixture.requireE2EServer()
         let roomName = "e2e-agent-audio-overlap-\(UUID().uuidString.prefix(8))"
         let subToken = try TokenGenerator(
@@ -298,80 +295,25 @@ struct SessionScreenShareE2ETests {
         if let connectError { throw connectError }
 
         // Two concurrent agent-audio publications (models an overlapping
-        // republish: both subscribed before either unsubscribes).
+        // republish: both subscribed before either unsubscribes). The tap
+        // follows the most recent subscribe.
         let pub1 = try await agent.localParticipant.publish(audioTrack: LocalAudioTrack.createTrack())
-        let pub2 = try await agent.localParticipant.publish(audioTrack: LocalAudioTrack.createTrack())
+        _ = try await agent.localParticipant.publish(audioTrack: LocalAudioTrack.createTrack())
 
-        var bothTracked = false
+        var tapped = false
         for _ in 0..<50 {
-            let sids = subscriber._testStatsEnabledAgentTrackSIDs()
-            if sids.contains(pub1.sid), sids.contains(pub2.sid) { bothTracked = true; break }
+            if subscriber._testHasOutputLevelTap() { tapped = true; break }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
-        #expect(bothTracked, "both overlapping agent-audio publications must be stats-enabled")
+        #expect(tapped, "an agent-audio subscribe must attach the output tap")
 
         // Unpublish the first — it is no longer the current output tap.
         try await agent.localParticipant.unpublish(publication: pub1)
 
-        var staleCleaned = false
-        for _ in 0..<50 {
-            let sids = subscriber._testStatsEnabledAgentTrackSIDs()
-            if !sids.contains(pub1.sid), sids.contains(pub2.sid) { staleCleaned = true; break }
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
-        #expect(staleCleaned, "the stale (non-current-tap) publication's stats must be disabled on its unsubscribe")
-
-        await agent.disconnect()
-        await subscriber._disconnectRoomForTest()
-    }
-
-    @Test("a queued agent-audio stats enable is skipped once close() has run")
-    func agentAudioStatsEnableGuardedAgainstClose() async throws {
-        // The enable is enqueued off didSubscribeTrack, so close() — which sets
-        // isClosed and clears the stats set OUTSIDE the enqueue chain, then
-        // disconnects — can land first. Re-arming the ~1 Hz stats timer then
-        // would re-create the timer-outlives-track leak on a disconnected track.
-        // Verify the guard predicate: valid while subscribed+open, false once
-        // close() has run. (isClosed alone flips it here — _testMarkClosed does
-        // not clear the set — so this fails without the isClosed guard.)
-        let fixture = try E2EFixture.requireE2EServer()
-        let roomName = "e2e-agent-audio-close-\(UUID().uuidString.prefix(8))"
-        let subToken = try TokenGenerator(
-            apiKey: fixture.apiKey, apiSecret: fixture.apiSecret,
-            identity: "subscriber", room: roomName
-        ).sign()
-        let agentToken = try TokenGenerator(
-            apiKey: fixture.apiKey, apiSecret: fixture.apiSecret,
-            identity: "agent", room: roomName, isAgent: true
-        ).sign()
-
-        let subscriber = makeTransport()
-        try await subscriber._connectRoomForTest(
-            url: fixture.serverURL, token: subToken, attachDelegate: true
-        )
-        let agent = Room(roomOptions: RoomOptions(adaptiveStream: true, dynacast: true))
-        var connectError: Error?
-        for attempt in 0..<3 {
-            do { try await agent.connect(url: fixture.serverURL, token: agentToken); connectError = nil; break }
-            catch { connectError = error; if attempt < 2 { try? await Task.sleep(nanoseconds: 500_000_000) } }
-        }
-        if let connectError { throw connectError }
-
-        _ = try await agent.localParticipant.publish(audioTrack: LocalAudioTrack.createTrack())
-
-        var sid: Track.Sid?
-        for _ in 0..<50 {
-            if let s = subscriber._testStatsEnabledAgentTrackSIDs().first { sid = s; break }
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
-        let publicationSID = try #require(sid, "agent audio must be stats-tracked before the guard check")
-        #expect(subscriber.shouldEnableAgentAudioStats(sid: publicationSID),
-                "enable is valid while the publication is subscribed and the session is open")
-
-        // Simulate close() landing before the queued enable runs.
-        await subscriber._testMarkClosed()
-        #expect(!subscriber.shouldEnableAgentAudioStats(sid: publicationSID),
-                "a queued enable must be skipped once close() has run")
+        // Give the unsubscribe time to land, then assert the tap SURVIVED.
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        #expect(subscriber._testHasOutputLevelTap(),
+                "a stale publication's unsubscribe must not detach the current tap")
 
         await agent.disconnect()
         await subscriber._disconnectRoomForTest()

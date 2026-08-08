@@ -13,31 +13,174 @@ import os
 
 private let clientToolLog = Logger(subsystem: CosmoRealtimeLog.subsystem, category: "client-tools")
 
-private let clientToolTruncationSuffix = "… [truncated]"
+private let clientToolTruncationSuffix = ClientToolReply.truncationSuffix
+
+private func shrinkOne(_ text: String, maxScalars: Int) -> String {
+    let scalars = text.unicodeScalars
+    guard scalars.count > maxScalars else { return text }
+    let kept = String(String.UnicodeScalarView(scalars.prefix(maxScalars)))
+    let shortened = kept + clientToolTruncationSuffix
+    // Never spend more bytes than the string being replaced: the suffix is
+    // longer than what it stands in for on a short string. Keeping the whole
+    // string there is both smaller and truthful, and it is what makes the
+    // shortened size rise monotonically with the allowance — the property
+    // ``clientToolSuccessReply``'s binary search needs to be able to prune.
+    return shortened.utf8.count >= text.utf8.count ? text : shortened
+}
+
+/// Shorten every string in ``value`` to at most ``maxScalars`` Unicode
+/// scalars, leaving any string the suffix would not actually shrink. Applied
+/// to the original each time, so a second pass never truncates a suffix the
+/// first wrote. Scalars rather than ``String/count``'s grapheme clusters: the
+/// one unit all three SDKs count identically. Pinned by `replyLimits.shrink`.
+func shrinkStrings(_ value: JSONValue, maxScalars: Int) -> JSONValue {
+    switch value {
+    case .string(let text):
+        return .string(shrinkOne(text, maxScalars: maxScalars))
+    case .array(let items):
+        return .array(items.map { shrinkStrings($0, maxScalars: maxScalars) })
+    case .object(let fields):
+        return .object(fields.mapValues { shrinkStrings($0, maxScalars: maxScalars) })
+    case .int, .double, .bool, .null:
+        return value
+    }
+}
+
+private func longestStringLength(_ value: JSONValue) -> Int {
+    switch value {
+    case .string(let text): return text.unicodeScalars.count
+    case .array(let items): return items.map(longestStringLength).max() ?? 0
+    case .object(let fields): return fields.values.map(longestStringLength).max() ?? 0
+    default: return 0
+    }
+}
+
+private func serializedBytes(_ fields: [String: JSONValue]) -> Int {
+    (try? JSONEncoder().encode(fields).count) ?? 0
+}
+
+/// What one top-level entry costs the envelope — its key as well as its value,
+/// since a long key spends the same bytes a long value does.
+private func entryBytes(_ fields: [String: JSONValue], _ key: String) -> Int {
+    serializedBytes([key: fields[key] ?? .null])
+}
+
+/// ``result`` plus the truncation marker: the note, and how much of
+/// ``originalBytes`` survived.
+private func markedResult(
+    _ result: [String: JSONValue], originalBytes: Int
+) -> [String: JSONValue] {
+    var marked = result
+    marked[ClientToolReply.truncationMarkerKey] = .object([
+        "note": .string(ClientToolReply.truncationMarkerNote),
+        "kept_bytes": .int(serializedBytes(result)),
+        "original_bytes": .int(originalBytes),
+    ])
+    return marked
+}
+
+/// An ``{ok: true}`` envelope whose serialized form fits the size cap.
+///
+/// An over-budget result is shortened structurally rather than by cutting the
+/// serialized envelope, so the reply the model reads is always well-formed
+/// JSON: strings shrink to the largest common allowance that fits, and if the
+/// non-string structure alone still overflows, top-level entries are dropped
+/// largest-first. Either way the result carries
+/// ``ClientToolReply/truncationMarkerKey`` so the model knows to ask a
+/// narrower question instead of reading the reply as the whole answer.
+func clientToolSuccessReply(_ result: [String: JSONValue]) -> (reply: String, truncated: Bool) {
+    let envelope = ClientToolReply.envelope(ok: true, result: result)
+    if envelope.utf8.count <= ClientToolReply.maxBytes { return (envelope, false) }
+    let originalBytes = serializedBytes(result)
+
+    // Largest per-string allowance that fits. JSON-escaping makes encoded size
+    // unpredictable from character counts, so search rather than compute it.
+    var low = 0
+    var high = longestStringLength(.object(result))
+    var best: String?
+    while low <= high {
+        let mid = low + (high - low) / 2
+        let shrunk = shrinkStrings(.object(result), maxScalars: mid)
+        guard case .object(let fields) = shrunk else { break }
+        let candidate = ClientToolReply.envelope(ok: true, result: markedResult(fields, originalBytes: originalBytes))
+        if candidate.utf8.count <= ClientToolReply.maxBytes {
+            best = candidate
+            low = mid + 1
+        } else {
+            high = mid - 1
+        }
+    }
+    if let best { return (best, true) }
+
+    // Non-string structure (long arrays, many keys) is what overflows: drop
+    // top-level entries, biggest first, until what remains fits. Each entry is
+    // sized once, and how many to drop is found by binary search — dropping
+    // more only ever shrinks the reply, so the fit is monotone in the count.
+    guard case .object(let fields) = shrinkStrings(.object(result), maxScalars: 0) else {
+        return (ClientToolReply.envelope(ok: true, result: markedResult([:], originalBytes: originalBytes)), true)
+    }
+    let widestFirst = fields.keys.sorted {
+        (entryBytes(fields, $0), $0) > (entryBytes(fields, $1), $1)
+    }
+    func afterDropping(_ count: Int) -> String {
+        var kept = fields
+        for key in widestFirst.prefix(count) { kept.removeValue(forKey: key) }
+        return ClientToolReply.envelope(ok: true, result: markedResult(kept, originalBytes: originalBytes))
+    }
+    low = 1
+    high = widestFirst.count
+    var fitted: String?
+    while low <= high {
+        let mid = low + (high - low) / 2
+        let candidate = afterDropping(mid)
+        if candidate.utf8.count <= ClientToolReply.maxBytes {
+            fitted = candidate
+            high = mid - 1
+        } else {
+            low = mid + 1
+        }
+    }
+    return (
+        fitted
+            ?? ClientToolReply.envelope(
+                ok: true, result: markedResult([:], originalBytes: originalBytes)),
+        true
+    )
+}
+
+/// Serialize ``build(text)``, shrinking ``text`` until the envelope fits the
+/// size cap. Cuts on Unicode scalar boundaries — ``String/prefix(_:)`` would
+/// cut on grapheme clusters, so the same message would shorten to different
+/// text here than in the sibling SDKs.
+private func fitByShrinking(_ text: String, _ build: (String) -> String) -> String {
+    // JSON-escaping and the multi-byte suffix make the encoded size hard to
+    // predict from the text length, so shrink the kept prefix until it fits.
+    let scalars = Array(text.unicodeScalars)
+    var keep = scalars.count
+    while keep > 0 {
+        let kept = String(String.UnicodeScalarView(scalars.prefix(keep)))
+        let candidate = build(kept + clientToolTruncationSuffix)
+        let size = candidate.utf8.count
+        if size <= ClientToolReply.maxBytes { return candidate }
+        keep -= max(size - ClientToolReply.maxBytes, 1)
+    }
+    return build(clientToolTruncationSuffix)
+}
 
 /// An ``{ok: false}`` envelope whose serialized form fits the size cap,
 /// truncating the error text if needed.
 func clientToolErrorReply(_ message: String) -> String {
     let envelope = ClientToolReply.envelope(ok: false, error: message)
     if envelope.utf8.count <= ClientToolReply.maxBytes { return envelope }
-    // JSON-escaping and the multi-byte suffix make the encoded size hard
-    // to predict from the message length, so shrink the kept prefix until
-    // the full envelope fits.
-    var keep = message.count
-    while keep > 0 {
-        let truncated = String(message.prefix(keep)) + clientToolTruncationSuffix
-        let candidate = ClientToolReply.envelope(ok: false, error: truncated)
-        let size = candidate.utf8.count
-        if size <= ClientToolReply.maxBytes { return candidate }
-        keep -= max(size - ClientToolReply.maxBytes, 1)
-    }
-    return ClientToolReply.envelope(ok: false, error: clientToolTruncationSuffix)
+    return fitByShrinking(message) { ClientToolReply.envelope(ok: false, error: $0) }
 }
 
 /// Decode the RPC request, run the handler, and build the reply envelope.
-/// A non-object args payload, a handler throw, or an oversized success
-/// result all map to an ``{ok: false}`` envelope; a successful handler
-/// maps to ``{ok: true, result: <object>}``.
+/// A non-object args payload or a handler throw maps to an ``{ok: false}``
+/// envelope; a successful handler maps to ``{ok: true, result: <object>}``,
+/// shortened to fit ``ClientToolReply/maxBytes`` if it has to be. The
+/// ``PostToolUse`` outcome carries the handler's own result, not the
+/// shortened one — the cap is a transport property, not a tool failure.
 /// When ``hooks`` is non-nil and a ``sessionId`` exists, fires
 /// ``PreToolUse`` before the handler (and may skip it on deny) and
 /// ``PostToolUse`` after (mirrors the reference ``_invoke_handler`` in
@@ -86,16 +229,12 @@ func invokeClientToolHandler(
     let toolOutcome: ToolOutcome
     do {
         let result = try await handler(args)
-        let envelope = ClientToolReply.envelope(ok: true, result: result)
-        if envelope.utf8.count > ClientToolReply.maxBytes {
-            clientToolLog.warning("client tool result exceeded the reply size limit tool=\(toolName, privacy: .public)")
-            let msg = "client tool result exceeded the reply size limit"
-            reply = clientToolErrorReply(msg)
-            toolOutcome = .error(msg)
-        } else {
-            reply = envelope
-            toolOutcome = .ok(result)
+        let built = clientToolSuccessReply(result)
+        if built.truncated {
+            clientToolLog.warning("client tool result truncated to fit the reply size limit tool=\(toolName, privacy: .public)")
         }
+        reply = built.reply
+        toolOutcome = .ok(result)
     } catch {
         clientToolLog.error("client tool handler failed tool=\(toolName, privacy: .public): \(error.localizedDescription, privacy: .public)")
         warnIfHookRewriteBrokeValidation(error, toolName: toolName, argsRewritten: argsRewritten)
@@ -201,27 +340,33 @@ func registerClientToolHandlers(
 }
 
 /// Thrown from the client-tool RPC handler when the caller is not the session
-/// agent — the agent-only caller guard. Relocated from the retired legacy
-/// client, which shared the same LiveKit RPC registration path.
+/// agent — the agent-only caller guard.
 struct NonAgentRpcCallerError: Error {}
 
 // MARK: - Background client tools (deferred path)
 
-/// The deferred-ack reply envelope: ``{ok:true, deferred:true, job_id, result:{note}}``.
+/// The deferred-ack reply envelope: ``{ok:true, deferred:true, job_id, result:{note}}``,
+/// shrinking the note if needed so the envelope fits the size cap.
 /// The worker registers the job from ``job_id`` and injects the terminal result
 /// (delivered later via ``tool_job_result``) into the live session.
 func clientToolDeferredReply(jobId: String, note: String) -> String {
-    let object: [String: JSONValue] = [
-        "ok": .bool(true),
-        "result": .object(note.isEmpty ? [:] : ["note": .string(note)]),
-        "error": .null,
-        "deferred": .bool(true),
-        "job_id": .string(jobId),
-    ]
-    guard let data = try? JSONEncoder().encode(object) else {
-        return #"{"ok":false,"result":null,"error":"reply encode failed"}"#
+    func build(_ note: String) -> String {
+        let object: [String: JSONValue] = [
+            "ok": .bool(true),
+            "result": .object(note.isEmpty ? [:] : ["note": .string(note)]),
+            "error": .null,
+            "deferred": .bool(true),
+            "job_id": .string(jobId),
+        ]
+        guard let data = try? JSONEncoder().encode(object) else {
+            return #"{"ok":false,"result":null,"error":"reply encode failed"}"#
+        }
+        return String(decoding: data, as: UTF8.self)
     }
-    return String(decoding: data, as: UTF8.self)
+    let envelope = build(note)
+    if envelope.utf8.count <= ClientToolReply.maxBytes { return envelope }
+    clientToolLog.warning("client tool ack note truncated to fit the reply size limit job_id=\(jobId, privacy: .public)")
+    return fitByShrinking(note, build)
 }
 
 private func decodeClientToolArgs(_ payload: String, tool toolName: String) -> [String: JSONValue]? {

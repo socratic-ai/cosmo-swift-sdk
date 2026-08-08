@@ -51,6 +51,11 @@ extension LiveKitSessionTransport {
         isClosed.withLock { $0 = true }
     }
 
+    /// Whether ``audioStreamLock`` currently holds any state.
+    nonisolated func _testAudioStreamLockHasValue() -> Bool {
+        audioStreamLock.withLock { $0 != nil }
+    }
+
     /// Connect the transport's room directly to a LiveKit ``Room`` with a
     /// pre-minted token, bypassing the REST session-start. Used by E2E
     /// tests that talk to a local ``livekit-server`` in dev mode so the
@@ -58,8 +63,8 @@ extension LiveKitSessionTransport {
     ///
     /// Pass ``attachDelegate: true`` to wire the production
     /// ``SessionRoomDelegate`` (with no-op transport callbacks) so remote
-    /// track subscribe/unsubscribe events — e.g. agent audio and its QoE
-    /// stats lifecycle — flow through the same handlers production uses.
+    /// track subscribe/unsubscribe events — e.g. the agent-audio tap
+    /// lifecycle — flow through the same handlers production uses.
     func _connectRoomForTest(url: String, token: String, attachDelegate: Bool = false) async throws {
         let newRoom = Room(roomOptions: RoomOptions(adaptiveStream: true, dynacast: true))
         if attachDelegate {
@@ -87,22 +92,14 @@ extension LiveKitSessionTransport {
     /// Whether the agent-audio output-level tap is currently attached — a
     /// proxy for "an agent ``RemoteAudioTrack`` is subscribed", set by
     /// ``didSubscribeTrack`` and cleared by ``didUnsubscribeTrack`` (the same
-    /// handler that disables the track's QoE stats).
+    /// handler that detaches the track's output tap).
     nonisolated func _testHasOutputLevelTap() -> Bool {
         attachedRemoteTrack.withLock { $0 != nil }
     }
 
-    /// Publication SIDs of agent-audio tracks currently registered for QoE
-    /// stats. An unsubscribe must drop the SID here (and disable its stats)
-    /// even when that publication is no longer the current output tap — the
-    /// overlapping-republish case.
-    nonisolated func _testStatsEnabledAgentTrackSIDs() -> Set<Track.Sid> {
-        Set(statsEnabledAgentTracks.withLock { $0.keys })
-    }
-
     /// Force the subscriber-side ``set(subscribed: false)`` unsubscribe, which
     /// nils ``publication.track`` before notifying ``didUnsubscribeTrack`` —
-    /// the exact path ``endAgentAudioTap`` must handle by SID. Unsubscribes
+    /// the exact path ``endAgentAudio(publicationSID:)`` must handle by SID. Unsubscribes
     /// every subscribed agent-audio publication the room currently holds.
     func _testForceUnsubscribeAgentAudio() async throws {
         guard let room else { return }

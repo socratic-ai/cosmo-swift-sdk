@@ -4,8 +4,7 @@ import Testing
 import LiveKit
 @testable import CosmoRealtime
 
-/// Mirrors the legacy ``ScreenShareStateTests`` for the new external-
-/// protocol surface: the screen-share lock-state machine now lives in
+/// The screen-share lock-state machine lives in
 /// ``LiveKitSessionTransport`` (it owns the room), so the publish-failure
 /// recovery invariants are asserted there. These drive the production
 /// ``handleScreenSharePublishFailure(_:capturedState:)`` helper directly —
@@ -110,77 +109,61 @@ struct SessionScreenShareTests {
 
     // MARK: reconcileScreenSharePublish ordering
     //
-    // The deferred publish arms LiveKit's ~1 Hz stats timer via
-    // ``enableStats``; ``stopScreenShare`` disarms it *before* unpublishing so
-    // it never ticks against a removed sender (the crash). The reconciliation
-    // must never let stats end up enabled after a concurrent stop — i.e. a
-    // stop that lands while stats are being enabled must still leave a
-    // ``disableStats`` as the last stats op before the sender goes away. These
+    // A deferred publish can land after a concurrent ``stopScreenShare`` (or a
+    // stop + restart) has cleared or REPLACED the share. Whoever owns the
+    // publication owns its teardown: stop keys off the publication, so it is a
+    // no-op until ``adopt`` exposes one, and a publish whose ``adopt`` fails
+    // must unpublish the sender it created rather than leaving it live. These
     // drive ``reconcileScreenSharePublish`` with recording closures and assert
-    // the exact call order for each stop-timing. Fully offline: the crash
-    // itself needs a real RTP sender (E2E), but the ordering that prevents it
-    // is pure control flow.
+    // the exact call order for each stop-timing. Fully offline: the real path
+    // needs a live SFU, but the ordering is pure control flow.
 
-    @Test("reconcile: no concurrent stop → enable stats, adopt, never tear down")
-    func reconcileHappyPathEnablesThenAdopts() async throws {
+    @Test("reconcile: no concurrent stop → adopt, never tear down")
+    func reconcileHappyPathAdopts() async throws {
         let transport = makeTransport()
         let calls = OSAllocatedUnfairLock<[String]>(initialState: [])
 
         await transport.reconcileScreenSharePublish(
             stillCurrent: { true },
-            enableStats: { calls.withLock { $0.append("enable") } },
             adopt: { calls.withLock { $0.append("adopt") }; return true },
-            disableStats: { calls.withLock { $0.append("disable") } },
             unpublish: { calls.withLock { $0.append("unpublish") } }
         )
 
-        #expect(calls.withLock { $0 } == ["enable", "adopt"],
-                "the live share must enable stats then adopt, with no teardown")
+        #expect(calls.withLock { $0 } == ["adopt"],
+                "the live share must adopt its publication with no teardown")
     }
 
-    @Test("reconcile: stop before enable → unpublish only, stats never touched")
-    func reconcileSupersededBeforeEnableSkipsStats() async throws {
+    @Test("reconcile: stop before adopt → unpublish only")
+    func reconcileSupersededBeforeAdoptUnpublishes() async throws {
         let transport = makeTransport()
         let calls = OSAllocatedUnfairLock<[String]>(initialState: [])
 
         await transport.reconcileScreenSharePublish(
             stillCurrent: { false },
-            enableStats: { calls.withLock { $0.append("enable") } },
             adopt: { calls.withLock { $0.append("adopt") }; return true },
-            disableStats: { calls.withLock { $0.append("disable") } },
             unpublish: { calls.withLock { $0.append("unpublish") } }
         )
 
-        // Never enabling stats is the point: nothing to leave running against
-        // the sender we are about to drop.
         #expect(calls.withLock { $0 } == ["unpublish"],
-                "a share already superseded at publish time must unpublish without enabling stats")
+                "a share already superseded at publish time must unpublish without adopting")
     }
 
-    @Test("reconcile: stop during enable → disable stats before unpublish (regression)")
-    func reconcileSupersededDuringEnableDisablesBeforeUnpublish() async throws {
-        // The crash regression: the share was current when the publish landed
-        // (stats get enabled), but a stop replaced it before ``adopt`` — so the
-        // enabled stats MUST be disabled again, and that disable MUST precede
-        // the unpublish, or the ~1 Hz timer ticks against the removed sender.
+    @Test("reconcile: stop during publish → this task unpublishes its own sender")
+    func reconcileSupersededDuringPublishUnpublishes() async throws {
+        // The share was current when the publish landed but a stop replaced it
+        // before ``adopt`` — stop never saw this publication, so teardown is
+        // this task's job.
         let transport = makeTransport()
         let calls = OSAllocatedUnfairLock<[String]>(initialState: [])
 
         await transport.reconcileScreenSharePublish(
             stillCurrent: { true },
-            enableStats: { calls.withLock { $0.append("enable") } },
             adopt: { calls.withLock { $0.append("adopt") }; return false },
-            disableStats: { calls.withLock { $0.append("disable") } },
             unpublish: { calls.withLock { $0.append("unpublish") } }
         )
 
-        #expect(calls.withLock { $0 } == ["enable", "adopt", "disable", "unpublish"],
-                "a stop during enable must disable stats before unpublishing the stale sender")
-        let order = calls.withLock { $0 }
-        let disableIdx = order.firstIndex(of: "disable")
-        let unpublishIdx = order.firstIndex(of: "unpublish")
-        #expect(disableIdx != nil && unpublishIdx != nil && disableIdx! < unpublishIdx!,
-                "stats must be disabled strictly before the sender is unpublished")
+        #expect(calls.withLock { $0 } == ["adopt", "unpublish"],
+                "a superseded publish must unpublish the sender it created")
     }
 
     @Test("startScreenShare without a connected room throws .notConnected")

@@ -54,6 +54,8 @@ extension RealtimeClient {
         switch output {
         case .ok(let ok):
             return try ok.body.json
+        case .unauthorized(let err):
+            throw Self._unauthorized(as: VerifyError.self, try? err.body.json.detail)
         case .undocumented(let statusCode, let payload):
             throw await Self._undocumented(as: VerifyError.self, statusCode, payload)
         }

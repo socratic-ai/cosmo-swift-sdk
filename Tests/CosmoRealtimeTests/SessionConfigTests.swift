@@ -153,6 +153,77 @@ struct SessionConfigTests {
         #expect(serverSpec.count == 1)
     }
 
+    @Test("Gemini endpointing knobs serialize under their wire names")
+    func geminiEndpointingKnobsSerialize() throws {
+        let fields = try encodedFields(
+            SessionConfig(
+                modelOptions: .gemini(
+                    includeThoughts: false,
+                    endOfSpeechSensitivity: .high,
+                    silenceDurationMs: 200,
+                    prefixPaddingMs: 100
+                )
+            )
+        )
+        guard let agent = object(fields, "agent"),
+            let modelOptions = object(agent, "model_options")
+        else {
+            Issue.record("expected a model_options sub-object under agent")
+            return
+        }
+        #expect(modelOptions["provider"] == .string("gemini"))
+        #expect(modelOptions["include_thoughts"] == .bool(false))
+        #expect(modelOptions["end_of_speech_sensitivity"] == .string("high"))
+        #expect(modelOptions["silence_duration_ms"] == .int(200))
+        #expect(modelOptions["prefix_padding_ms"] == .int(100))
+        #expect(modelOptions["temperature"] == nil)
+    }
+
+    @Test("an unconfigured OpenAI block carries only the discriminator")
+    func openAIDefaultsStayAbsent() throws {
+        let fields = try encodedFields(SessionConfig(modelOptions: .openai()))
+        guard let agent = object(fields, "agent") else {
+            Issue.record("expected an agent sub-object")
+            return
+        }
+        #expect(agent["model_options"] == .object(["provider": .string("openai")]))
+    }
+
+    @Test("each OpenAI turn detector serializes only the knobs it reads")
+    func openAITurnDetectionSerializes() throws {
+        let serverVad = try encodedFields(
+            SessionConfig(
+                modelOptions: .openai(
+                    turnDetection: .serverVad(silenceDurationMs: 200, prefixPaddingMs: 100)
+                )
+            )
+        )
+        guard let agent = object(serverVad, "agent"),
+            let modelOptions = object(agent, "model_options")
+        else {
+            Issue.record("expected a model_options sub-object under agent")
+            return
+        }
+        #expect(modelOptions["turn_detection"] == .string("server_vad"))
+        #expect(modelOptions["silence_duration_ms"] == .int(200))
+        #expect(modelOptions["prefix_padding_ms"] == .int(100))
+        #expect(modelOptions["eagerness"] == nil)
+
+        let semanticVad = try encodedFields(
+            SessionConfig(modelOptions: .openai(turnDetection: .semanticVad(eagerness: .high)))
+        )
+        guard let semanticAgent = object(semanticVad, "agent"),
+            let semanticOptions = object(semanticAgent, "model_options")
+        else {
+            Issue.record("expected a model_options sub-object under agent")
+            return
+        }
+        #expect(semanticOptions["turn_detection"] == .string("semantic_vad"))
+        #expect(semanticOptions["eagerness"] == .string("high"))
+        #expect(semanticOptions["silence_duration_ms"] == nil)
+        #expect(semanticOptions["prefix_padding_ms"] == nil)
+    }
+
     @Test("client-tool handlers are local-only and never reach the wire")
     func handlersStayLocal() throws {
         let handler: ClientToolHandler = { _ in ["ok": .bool(true)] }
@@ -229,117 +300,6 @@ struct SessionConfigTests {
         #expect(agent["voice"] == .object(["name": .string("Puck")]))
     }
 
-    @Test("dictation composes audioOutput=false and strips every tool")
-    func dictationComposesFromPrimitives() throws {
-        let config = try VoiceSession.makeConfig(
-            declaredTools: [
-                DeclaredClientTool(
-                    name: "type_text", description: "types text",
-                    parametersJSON: #"{"type":"object"}"#
-                )
-            ],
-            backgroundClientToolHandlers: nil,
-            voiceName: nil,
-            resumeFromCallId: nil,
-            providerPreference: nil,
-            noiseCancellationEnabled: nil,
-            storeRecording: false,
-            interruptionSensitivity: nil,
-            thinkingLevel: nil,
-            connectGreeting: nil,
-            systemPrompt: "Transcribe only.",
-            speakingStyle: nil,
-            agentName: nil,
-            dictation: true
-        )
-        #expect(config.audio?.output == false)
-        #expect(config.tools == nil, "dictation must strip every tool")
-    }
-
-    @Test("non-dictation sessions leave audioOutput unset on the wire")
-    func nonDictationLeavesAudioOutputUnset() throws {
-        let config = try VoiceSession.makeConfig(
-            declaredTools: nil,
-            backgroundClientToolHandlers: nil,
-            voiceName: nil,
-            resumeFromCallId: nil,
-            providerPreference: nil,
-            noiseCancellationEnabled: nil,
-            storeRecording: true,
-            interruptionSensitivity: nil,
-            thinkingLevel: nil,
-            connectGreeting: nil,
-            systemPrompt: nil,
-            speakingStyle: nil,
-            agentName: nil,
-            dictation: false
-        )
-        #expect(config.audio == nil)
-    }
-
-    private func namedUserConfig(agentName: String?) throws -> SessionConfig {
-        try VoiceSession.makeConfig(
-            declaredTools: nil,
-            backgroundClientToolHandlers: nil,
-            voiceName: nil,
-            resumeFromCallId: nil,
-            providerPreference: nil,
-            noiseCancellationEnabled: nil,
-            storeRecording: true,
-            interruptionSensitivity: nil,
-            thinkingLevel: nil,
-            connectGreeting: ConnectGreeting.openingLine(userDisplayName: "Utkarsh Ranjan"),
-            systemPrompt: "You are Cosmo.",
-            speakingStyle: ConnectGreeting.nameDirective(
-                userDisplayName: "Utkarsh Ranjan", dictation: false
-            ),
-            agentName: agentName,
-            dictation: false
-        )
-    }
-
-    /// The whole config a named user's session goes out with: the greeting is
-    /// the spoken line only, and the name directive rides
-    /// `voice.speakingStyle`. The server voices `greeting` verbatim, so a
-    /// directive that leaks into it is read aloud to the user.
-    @Test("a named user's config keeps directives out of the spoken greeting")
-    func namedUserConfigSeparatesGreetingFromDirective() throws {
-        let config = try namedUserConfig(agentName: nil)
-        #expect(config.greeting == "Hey Utkarsh, Cosmo here!")
-        #expect(config.instructions == "You are Cosmo.")
-        #expect(
-            config.voice?.speakingStyle?.contains(
-                #"The user's name is "Utkarsh Ranjan"."#) == true
-        )
-    }
-
-    /// A catalog agent runs its stored config verbatim, so `instructions` and
-    /// `greeting` are dropped — but the speaking style is a per-run
-    /// ride-along the server accepts alongside it (on the `voice` block),
-    /// which is why the name directive lives there. Riding `instructions`
-    /// would lose the name on this path entirely.
-    @Test("the name directive survives a catalog agent, which drops instructions")
-    func nameDirectiveRidesAlongsideACatalogAgent() throws {
-        let config = try namedUserConfig(agentName: "maya")
-        #expect(config.instructions == nil)
-        #expect(config.greeting == nil)
-        #expect(
-            config.voice?.speakingStyle?.contains(
-                #"The user's name is "Utkarsh Ranjan"."#) == true
-        )
-
-        // The wire payload rejects stored-config fields for a catalog agent;
-        // the voice block's speaking style must not be one of them.
-        let agent = object(try encodedFields(config), "agent")
-        let voice = agent.flatMap { fields -> [String: JSONValue]? in
-            guard case .object(let inner)? = fields["voice"] else { return nil }
-            return inner
-        }
-        #expect(
-            voice?["speaking_style"]
-                == config.voice?.speakingStyle.map { .string($0) }
-        )
-    }
 }
 
 extension SessionConfigTests {
@@ -382,70 +342,4 @@ extension SessionConfigTests {
         )
     }
 
-    @Test("the locator is not declared without a capture slot, and dictation strips it")
-    func locatorFollowsTheCaptureSlot() throws {
-        let bare = try VoiceSession.makeConfig(
-            declaredTools: nil,
-            backgroundClientToolHandlers: nil,
-            voiceName: nil,
-            resumeFromCallId: nil,
-            providerPreference: nil,
-            noiseCancellationEnabled: nil,
-            storeRecording: false,
-            interruptionSensitivity: nil,
-            thinkingLevel: nil,
-            connectGreeting: nil,
-            systemPrompt: nil,
-            speakingStyle: nil,
-            agentName: nil,
-            dictation: false
-        )
-        // The locator pair rides every session too — pointing must not depend
-        // on an agent carrying them in builtin_tool_names. Asserted as an exact
-        // list so a cutover that rewrites this block can't drop them silently,
-        // and so a screen slot nobody wired can't creep in.
-        #expect(bare.tools == [.webSearch, .examineImage, .detectObjects, .pointAtObject])
-        #expect(bare.rpcOnlyHandlers().isEmpty)
-
-        let dictation = try VoiceSession.makeConfig(
-            declaredTools: nil,
-            clientTools: [.screenLocate { ScreenFixtures.capture() }],
-            backgroundClientToolHandlers: nil,
-            voiceName: nil,
-            resumeFromCallId: nil,
-            providerPreference: nil,
-            noiseCancellationEnabled: nil,
-            storeRecording: false,
-            interruptionSensitivity: nil,
-            thinkingLevel: nil,
-            connectGreeting: nil,
-            systemPrompt: nil,
-            speakingStyle: nil,
-            agentName: nil,
-            dictation: true
-        )
-        #expect(dictation.tools == nil, "dictation strips the capture slot with every other tool")
-        #expect(dictation.rpcOnlyHandlers().isEmpty)
-
-        let sharing = try VoiceSession.makeConfig(
-            declaredTools: nil,
-            clientTools: [.screenLocate { ScreenFixtures.capture() }],
-            backgroundClientToolHandlers: nil,
-            voiceName: nil,
-            resumeFromCallId: nil,
-            providerPreference: nil,
-            noiseCancellationEnabled: nil,
-            storeRecording: false,
-            interruptionSensitivity: nil,
-            thinkingLevel: nil,
-            connectGreeting: nil,
-            systemPrompt: nil,
-            speakingStyle: nil,
-            agentName: nil,
-            dictation: false
-        )
-        // Registered by RPC method, never by tool name: the model cannot call it.
-        #expect(Array(sharing.rpcOnlyHandlers().keys) == [ScreenLocateTool.rpcMethod])
-        #expect(sharing.clientToolHandlers().isEmpty)
-    }
 }

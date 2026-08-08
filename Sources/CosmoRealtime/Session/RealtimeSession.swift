@@ -1,3 +1,4 @@
+import CoreGraphics
 import CosmoRealtimeAPI
 import Foundation
 import OpenAPIRuntime
@@ -33,15 +34,34 @@ public actor RealtimeSession {
     static let log = Logger(subsystem: CosmoRealtimeLog.subsystem, category: "session")
 
     /// Wire-protocol version this session API speaks, carried on the
-    /// ``session-config`` start payload. The external protocol versions
-    /// independently of the legacy surface's ``PROTOCOL_VERSION``.
+    /// ``session-config`` start payload.
     public static let protocolVersion = "1.0"
+
+    /// Hard ceiling on a base64 image payload, mirroring the server-side
+    /// ingress bound (`_MAX_IMAGE_B64_LEN`) so a frame the server would refuse
+    /// never leaves the client — and never gets chunked across the control
+    /// channel on its way to being refused.
+    public static let maxImageBase64Length = 12_000_000
+
+    /// Payload size at which a frame is decoded to check its pixel dimensions.
+    ///
+    /// The bound we care about is on pixels, but reading pixels means decoding,
+    /// and decoding every frame would tax callers who are already well-behaved.
+    /// This floor is set so a compliant frame is forwarded without a decode
+    /// while an over-resolution one still gets inspected: a 2704x1756 desktop
+    /// screenshot measured 165K base64 chars at 1280px and 295K at 1920px.
+    /// Calibrated on desktop UI content — photographic or noisy frames compress
+    /// far worse and may cross it while already within the pixel bound, which
+    /// costs them one decode and no re-encode.
+    static let imageBase64InspectThreshold = 200_000
+
+    /// A caller streaming stills re-encodes every frame; warn once, not 3,600
+    /// times an hour.
+    private var didWarnImageReencode = false
 
     // MARK: Options
 
-    /// Client-level settings: credentials, endpoints, timeouts, and
-    /// optional default ``SessionConfig`` values merged under every
-    /// ``start(_:config:)`` call.
+    /// Client-level settings: credentials, endpoints, and timeouts.
     public struct Options: Sendable {
         /// The session credential. Exactly one form, chosen at construction.
         public enum Credential: Sendable, Equatable, CustomStringConvertible, CustomDebugStringConvertible {
@@ -52,11 +72,27 @@ public actor RealtimeSession {
             /// A minted per-user JWT — scoped to one external user, safe to
             /// embed in a device or browser. Opens sessions but cannot mint.
             case token(String)
+            /// A ``TokenSource`` that fetches — and keeps fresh — a minted
+            /// per-user JWT itself, so a distributed app never handles
+            /// refresh. Opens sessions but cannot mint.
+            case tokenSource(TokenSource)
 
-            /// The bearer value sent on the ``Authorization`` header.
-            var bearerValue: String {
+            /// The bearer value sent on the ``Authorization`` header — for a
+            /// ``tokenSource(_:)`` credential, the source's current JWT
+            /// (fetched or refreshed as needed).
+            func bearerToken() async throws -> String {
                 switch self {
                 case .apiKey(let v), .token(let v): return v
+                case .tokenSource(let source): return try await source.jwt()
+                }
+            }
+
+            public static func == (lhs: Credential, rhs: Credential) -> Bool {
+                switch (lhs, rhs) {
+                case (.apiKey(let l), .apiKey(let r)): return l == r
+                case (.token(let l), .token(let r)): return l == r
+                case (.tokenSource(let l), .tokenSource(let r)): return l === r
+                default: return false
                 }
             }
 
@@ -64,17 +100,17 @@ public actor RealtimeSession {
                 switch self {
                 case .apiKey: return "Credential.apiKey(•••)"
                 case .token: return "Credential.token(•••)"
+                case .tokenSource: return "Credential.tokenSource(•••)"
                 }
             }
             public var debugDescription: String { description }
         }
 
         public var credential: Credential
-        /// The Cosmo API origin, resolved from `COSMO_BASE_URL` (else
-        /// production) when these options are built. Read-only: an app that
-        /// chooses a backend publishes it to its own environment, so one
-        /// process talks to one backend and a stored credential cannot be
-        /// sent somewhere it was not issued for.
+        /// The Cosmo API origin: the `baseURL` passed at construction, else
+        /// `COSMO_BASE_URL`, else production. Fixed once the options are
+        /// built, so one session talks to one backend and a stored
+        /// credential cannot be sent somewhere it was not issued for.
         public internal(set) var baseURL: URL
         /// Timeout for the media-transport join (signaling + ICE).
         public var connectTimeout: TimeInterval
@@ -89,64 +125,136 @@ public actor RealtimeSession {
         /// backend works; remote hosts are always verified.
         public var verifyTLS: VerifyTLS
 
-        /// Identifies the calling app to the backend. Nil (the default) sends
-        /// no client headers, so third-party embedders are unaffected.
-        public var clientIdentity: ClientIdentity?
-
         /// `true` only for a ``Credential/apiKey(_:)`` credential — a
-        /// minted ``Credential/token(_:)`` cannot mint further tokens.
+        /// minted ``Credential/token(_:)`` (or the ``Credential/tokenSource(_:)``
+        /// that fetches one) cannot mint further tokens.
         public var canMint: Bool {
             if case .apiKey = credential { return true }
             return false
         }
 
+        /// The bearer value for this options' credential — awaited per
+        /// request so a ``Credential/tokenSource(_:)`` can refresh.
+        func bearerToken() async throws -> String {
+            try await credential.bearerToken()
+        }
+
+        /// ``baseURL`` defaults to ``RealtimeBaseURL/resolve()`` — the
+        /// environment override, else production. Pass one explicitly when the
+        /// credential itself names the backend that issued it: a stored or
+        /// minted credential is only valid against that origin, and resolving
+        /// from the environment would send its session start elsewhere.
         public init(
             credential: Credential,
+            baseURL: URL? = nil,
             connectTimeout: TimeInterval = 30,
             requestTimeout: TimeInterval = 45,
-            verifyTLS: VerifyTLS = .auto,
-            clientIdentity: ClientIdentity? = nil
+            verifyTLS: VerifyTLS = .auto
         ) {
             self.credential = credential
-            self.baseURL = RealtimeBaseURL.resolve()
+            self.baseURL = baseURL ?? RealtimeBaseURL.resolve()
             self.connectTimeout = connectTimeout
             self.requestTimeout = requestTimeout
             self.verifyTLS = verifyTLS
-            self.clientIdentity = clientIdentity
         }
 
         /// Convenience: a workspace api-key credential.
         public init(
             apiKey: String,
+            baseURL: URL? = nil,
             connectTimeout: TimeInterval = 30,
             requestTimeout: TimeInterval = 45,
-            verifyTLS: VerifyTLS = .auto,
-            clientIdentity: ClientIdentity? = nil
+            verifyTLS: VerifyTLS = .auto
         ) {
             self.init(
                 credential: .apiKey(apiKey),
+                baseURL: baseURL,
                 connectTimeout: connectTimeout,
                 requestTimeout: requestTimeout,
-                verifyTLS: verifyTLS,
-                clientIdentity: clientIdentity
+                verifyTLS: verifyTLS
             )
         }
 
         /// Convenience: a minted per-user JWT credential.
         public init(
             token: String,
+            baseURL: URL? = nil,
             connectTimeout: TimeInterval = 30,
             requestTimeout: TimeInterval = 45,
-            verifyTLS: VerifyTLS = .auto,
-            clientIdentity: ClientIdentity? = nil
+            verifyTLS: VerifyTLS = .auto
         ) {
             self.init(
                 credential: .token(token),
+                baseURL: baseURL,
                 connectTimeout: connectTimeout,
                 requestTimeout: requestTimeout,
-                verifyTLS: verifyTLS,
-                clientIdentity: clientIdentity
+                verifyTLS: verifyTLS
             )
+        }
+
+        /// Convenience: a self-refreshing ``TokenSource`` credential.
+        public init(
+            tokenSource: TokenSource,
+            baseURL: URL? = nil,
+            connectTimeout: TimeInterval = 30,
+            requestTimeout: TimeInterval = 45,
+            verifyTLS: VerifyTLS = .auto
+        ) {
+            self.init(
+                credential: .tokenSource(tokenSource),
+                baseURL: baseURL,
+                connectTimeout: connectTimeout,
+                requestTimeout: requestTimeout,
+                verifyTLS: verifyTLS
+            )
+        }
+
+        /// Zero-argument construction: the SDK resolves an API key itself —
+        /// `COSMO_API_KEY` from the environment, else the `cosmo login`
+        /// credentials file (`COSMO_CREDENTIALS_FILE` or
+        /// `~/.cosmo/credentials`, profile from `COSMO_PROFILE`). A file
+        /// credential brings its own `base_url` along, since a stored key is
+        /// only valid against the backend that issued it. Throws
+        /// ``CredentialsError`` when nothing resolves, the file is unusable,
+        /// or the stored key expired.
+        public init(
+            connectTimeout: TimeInterval = 30,
+            requestTimeout: TimeInterval = 45,
+            verifyTLS: VerifyTLS = .auto
+        ) throws {
+            try self.init(
+                environment: ProcessInfo.processInfo.environment,
+                connectTimeout: connectTimeout,
+                requestTimeout: requestTimeout,
+                verifyTLS: verifyTLS
+            )
+        }
+
+        /// The resolving init against a supplied environment; internal so
+        /// tests can inject one without mutating the process environment.
+        init(
+            environment: [String: String],
+            connectTimeout: TimeInterval = 30,
+            requestTimeout: TimeInterval = 45,
+            verifyTLS: VerifyTLS = .auto
+        ) throws {
+            let resolved = try CredentialsFile.resolveFromRuntime(environment: environment)
+            self.init(
+                credential: .apiKey(resolved.apiKey),
+                connectTimeout: connectTimeout,
+                requestTimeout: requestTimeout,
+                verifyTLS: verifyTLS
+            )
+            if let base = resolved.baseURL {
+                var raw = base
+                while raw.hasSuffix("/") { raw.removeLast() }
+                guard let url = URL(string: raw), url.scheme != nil else {
+                    throw CredentialsError.fileInvalid(
+                        "The resolved base_url is not a URL: \(base). Run: cosmo login"
+                    )
+                }
+                self.baseURL = url
+            }
         }
     }
 
@@ -205,10 +313,6 @@ public actor RealtimeSession {
     let options: Options?
     private let reassembler = EnvelopeReassembler()
     private var lifecycle: Lifecycle = .idle
-    // Monotonic per-session counter stamped on cosmo visual-context sends so
-    // the server can drop frames that lose the data-channel-vs-audio race.
-    // Bumped only from the cosmo sends extension (RealtimeSession+Cosmo).
-    var visualContextSeq: Int = 0
     private var hooks: HookEngine?
     // Reason latched from the server's best-effort ``session-ended`` frame;
     // consulted only on the unsolicited transport-close path.
@@ -226,8 +330,16 @@ public actor RealtimeSession {
     // later); cancelled on teardown so in-flight jobs don't outlive the session.
     private var clientToolJobSink: ClientToolJobSink?
 
+    /// The session-start response. Held whole so a new server field is
+    /// decoded rather than dropped, but surfaced field by field — the join
+    /// credentials on it are spent by the transport and the token has no
+    /// business on a public accessor.
+    private var startResponse: RealtimeSessionResponse?
+
     /// Server-minted session identifier, set once the start succeeds.
-    public private(set) var sessionId: String?
+    public var sessionId: String? { startResponse?.sessionId }
+
+
 
     /// Typed server events in arrival order. Every terminal path of a live
     /// session — graceful ``end()``, server teardown, or a transport drop —
@@ -296,16 +408,13 @@ public actor RealtimeSession {
         transport.setAgentPlaybackVolume(volume)
     }
 
-    // MARK: QoE
+    // MARK: Connect timings
 
-    /// Per-session WebRTC quality aggregated so far: connect-phase and
-    /// server-side start timings, sampled jitter / RTT / jitter-buffer
-    /// summaries, screen-share send health, freeze/packet-loss counters,
-    /// and a connection-quality summary. Safe to read at any time; read
-    /// it at session end for the final rollup. Sink-agnostic — the SDK
-    /// does not report it anywhere.
-    public nonisolated var qoeSnapshot: SessionQoESnapshot {
-        transport.qoeSnapshot
+    /// Connect-latency breakdown: the client-measured connect phases plus
+    /// the server's own session-start timings. Safe to read once the start
+    /// completes. Sink-agnostic — the SDK does not report it anywhere.
+    public nonisolated var connectTimings: SessionConnectTimings {
+        transport.connectTimings
     }
 
     // MARK: Init + start
@@ -382,8 +491,12 @@ public actor RealtimeSession {
     /// always allowed; plain `http` only for loopback hosts.
     static func isSecureBaseURL(_ url: URL) -> Bool {
         if url.scheme?.lowercased() == "https" { return true }
-        guard let host = url.host?.lowercased() else { return false }
-        return localHosts.contains(host)
+        return isLoopbackHost(url.host)
+    }
+
+    static func isLoopbackHost(_ host: String?) -> Bool {
+        guard let host else { return false }
+        return localHosts.contains(host.lowercased())
     }
 
     private static let localHosts: Set<String> = ["localhost", "127.0.0.1", "::1"]
@@ -455,6 +568,11 @@ public actor RealtimeSession {
             switch failure {
             case .rejected(let status, let code, let detail):
                 Self.log.error("session start rejected status=\(status.map(String.init) ?? "nil", privacy: .public) code=\(code ?? "nil", privacy: .public) detail=\(detail, privacy: .public)")
+                if status == 401, let options, case .tokenSource(let source) = options.credential {
+                    // Rejected despite the refresh skew — revoked, or clocks
+                    // disagree: drop the cache so the next start fetches fresh.
+                    await source.invalidate()
+                }
                 await _close(reason: .handshakeFailed(status: status, detail: detail))
                 if code == "version_mismatch" {
                     throw RealtimeSessionError.versionMismatch(detail: detail)
@@ -468,6 +586,13 @@ public actor RealtimeSession {
                     )
                 }
                 throw RealtimeSessionError.sessionStartFailed(message: detail)
+            case .credential(let error):
+                Self.log.error("session start credential resolution failed: \(error.localizedDescription, privacy: .public)")
+                await _close(reason: .transportError(message: error.localizedDescription))
+                // Un-erased on purpose: the caller branches on the mint slug
+                // (``token_source_failed`` vs a server rejection), matching
+                // the TypeScript and Python SDKs.
+                throw error
             case .transport(let message):
                 Self.log.error("session start transport failure: \(message, privacy: .public)")
                 await _close(reason: .transportError(message: message))
@@ -484,7 +609,7 @@ public actor RealtimeSession {
             // teardown already ran via ``_close``.
             throw RealtimeSessionError.notConnected
         }
-        sessionId = info.sessionId
+        startResponse = info.response
         lifecycle = .connected
         statesContinuation.yield(.connected)
         // A capture only fires once the locator calls, well after this, so the
@@ -558,6 +683,35 @@ public actor RealtimeSession {
         )
     }
 
+    /// Send a single image frame to the agent, downscaled to `maxLongEdge`.
+    ///
+    /// Preferred over the base64 overload: bounding happens here, before the
+    /// pixels are ever encoded or base64-inflated, so an oversized capture
+    /// costs nothing to discard. See ``ImageDownscale`` for why the default
+    /// ceiling is 1280 and when to raise it.
+    public func send(
+        image: CGImage,
+        maxLongEdge: Int = ImageDownscale.recommendedMaxLongEdge,
+        quality: Double = ImageDownscale.recommendedQuality,
+        streamId: String = "video.input.default"
+    ) async throws {
+        try _assertSendable()
+        let encoded = try ImageDownscale.encodeJPEG(
+            image: image,
+            maxLongEdge: maxLongEdge,
+            quality: quality
+        )
+        // Publish directly rather than routing through the base64 overload:
+        // this frame is already bounded to the caller's `maxLongEdge`, and
+        // that path would re-clamp it to the default and undo a deliberately
+        // raised ceiling.
+        try await _publishImage(
+            base64: encoded.base64,
+            mimeType: encoded.mimeType,
+            streamId: streamId
+        )
+    }
+
     /// Send a single image frame to the agent as base64 JSON.
     ///
     /// ``data`` is the base64-encoded image bytes (not raw bytes). Use this
@@ -565,15 +719,53 @@ public actor RealtimeSession {
     /// publishing a continuous video track would be overkill. Oversized
     /// frames are split into ``envelope-chunk`` packets transparently by
     /// ``_publish(_:)``; the server reassembles before dispatch.
+    ///
+    /// A payload past ``imageBase64InspectThreshold`` is decoded, and re-encoded
+    /// at ``ImageDownscale/recommendedMaxLongEdge`` if its long edge exceeds it.
+    /// This is a guard against egregiously oversized frames, not a categorical
+    /// resolution bound: an over-resolution frame that compresses below the
+    /// threshold is forwarded unchanged, because reading its dimensions would
+    /// mean decoding every frame every caller sends. For a guaranteed bound
+    /// (and no lossy re-encode), use
+    /// ``send(image:maxLongEdge:quality:streamId:)``.
     public func send(
         image data: String,
         mimeType: String = "image/jpeg",
         streamId: String = "video.input.default"
     ) async throws {
         try _assertSendable()
+        var payload = data
+        var payloadMimeType = mimeType
+        if data.count > Self.imageBase64InspectThreshold {
+            var reencode: ReencodeNote?
+            payload = try Self._bounded(
+                base64: data,
+                originalLength: data.count,
+                mimeType: &payloadMimeType,
+                reencode: &reencode
+            )
+            if let note = reencode, !didWarnImageReencode {
+                didWarnImageReencode = true
+                Self.log.warning(
+                    "send(image:) re-encoded an oversized frame base64_len=\(note.from, privacy: .public)->\(note.to, privacy: .public) dims=\(note.width, privacy: .public)x\(note.height, privacy: .public) — encode at \(ImageDownscale.recommendedMaxLongEdge, privacy: .public)px to avoid this round trip (logged once per session)"
+                )
+            }
+        }
+        try await _publishImage(
+            base64: payload,
+            mimeType: payloadMimeType,
+            streamId: streamId
+        )
+    }
+
+    private func _publishImage(
+        base64: String,
+        mimeType: String,
+        streamId: String
+    ) async throws {
         try await _publish(
             CosmoRealtimeAPI.Components.Schemas.RealtimeClientImage(
-                data: data,
+                data: base64,
                 mimeType: mimeType,
                 streamId: streamId,
                 _type: .sendImage
@@ -581,12 +773,90 @@ public actor RealtimeSession {
         )
     }
 
+    /// Downscale an oversized base64 frame, or fail with the measured size and
+    /// the recommended dimension. Only reached for payloads already past
+    /// ``imageBase64InspectThreshold``.
+    static func _bounded(
+        base64: String,
+        originalLength: Int,
+        mimeType: inout String,
+        reencode: inout ReencodeNote?
+    ) throws -> String {
+        // Downscaling is attempted before the hard limit is enforced: a
+        // full-resolution capture well past the limit usually lands far under
+        // it once bounded, and rejecting it first would refuse a frame we can
+        // trivially make sendable.
+        let downscaled: ImageDownscale.Encoded?
+        do {
+            downscaled = try ImageDownscale.downscaleBase64(base64)
+        } catch let error as ImageDownscale.Error {
+            guard originalLength > maxImageBase64Length else {
+                // Sendable size, just not downscalable (an unrecognized
+                // encoding). The server bound still applies; send as given.
+                log.warning(
+                    "send(image:) could not downscale frame base64_len=\(originalLength, privacy: .public): \(error.description, privacy: .public)"
+                )
+                return base64
+            }
+            log.error(
+                "send(image:) rejected oversized frame base64_len=\(originalLength, privacy: .public) limit=\(maxImageBase64Length, privacy: .public): \(error.description, privacy: .public)"
+            )
+            throw Self._tooLarge(originalLength)
+        }
+
+        guard let encoded = downscaled else {
+            // Within the pixel ceiling but over the byte threshold — a
+            // low-compression or lossless encode. Re-encoding buys nothing.
+            guard originalLength > maxImageBase64Length else { return base64 }
+            log.error(
+                "send(image:) rejected frame within the pixel bound but over the byte limit base64_len=\(originalLength, privacy: .public)"
+            )
+            throw Self._tooLarge(originalLength)
+        }
+
+        guard encoded.base64.count <= maxImageBase64Length else {
+            log.error(
+                "send(image:) frame still over the byte limit after downscaling base64_len=\(encoded.base64.count, privacy: .public)"
+            )
+            throw Self._tooLarge(encoded.base64.count)
+        }
+
+        mimeType = encoded.mimeType
+        reencode = ReencodeNote(
+            from: originalLength,
+            to: encoded.base64.count,
+            width: encoded.width,
+            height: encoded.height
+        )
+        return encoded.base64
+    }
+
+    /// One re-encode, for the caller to log. A caller that streams stills is
+    /// re-encoding every frame, so this is reported once per session rather
+    /// than once per frame.
+    struct ReencodeNote {
+        let from: Int
+        let to: Int
+        let width: Int
+        let height: Int
+    }
+
+    private static func _tooLarge(_ length: Int) -> ImageDownscale.Error {
+        .payloadTooLarge(
+            base64Length: length,
+            limit: maxImageBase64Length,
+            recommendedLongEdge: ImageDownscale.recommendedMaxLongEdge
+        )
+    }
+
     /// Stream raw bytes to the agent on a named ``topic``, out of band from
     /// the JSON control channel. For large binary client-tool payloads — a
     /// grounding screenshot plus its accessibility dump, say — that would be
     /// wasteful to base64 onto the control channel. Delivered only to the
-    /// agent participant.
-    public func send(bytes data: Data, topic: String) async throws {
+    /// agent participant. Internal: the screen tools' capture publish is the
+    /// consumer, matching the Python/TypeScript SDKs, which keep byte-stream
+    /// sending inside their tool plumbing.
+    func send(bytes data: Data, topic: String) async throws {
         try _assertSendable()
         try await transport.sendBytes(data, topic: topic)
     }
@@ -660,8 +930,8 @@ public actor RealtimeSession {
         await _close(reason: .clientClosed)
     }
 
-    // Internal (not private) so the cosmo sends extension (same module,
-    // RealtimeSession+Cosmo.swift) can reuse the one send path.
+    // Internal (not private) so the sibling send extensions in this module
+    // reuse the one send path.
     func _assertSendable() throws {
         switch lifecycle {
         case .connected, .reconnecting:
@@ -853,17 +1123,13 @@ public actor RealtimeSession {
 
 extension RealtimeSession.Options {
     /// The middleware stack every generated-client construction shares: bearer
-    /// auth, the client identity when set, and the prepared-room ref when one
-    /// was taken.
+    /// auth, and the room ref when a prepared room was taken.
     func _apiMiddlewares(
-        prepared: RealtimeSession.PreparedSessionHandle?
+        prepared: PreparedRoom?
     ) -> [any ClientMiddleware] {
         var middlewares: [any ClientMiddleware] = [
-            BearerAuthMiddleware(bearerToken: credential.bearerValue)
+            BearerAuthMiddleware(credential: credential)
         ]
-        if let clientIdentity {
-            middlewares.append(ClientIdentityMiddleware(identity: clientIdentity))
-        }
         if let prepared {
             middlewares.append(PreparedRoomHeaderMiddleware(
                 roomName: prepared.roomName, roomGrant: prepared.roomGrant
@@ -905,9 +1171,9 @@ public enum RealtimeSessionError: Error, LocalizedError, Equatable {
     /// incompatible protocol version. Upgrade the SDK.
     case versionMismatch(detail: String)
     /// The backend returned HTTP 503: realtime voice is temporarily
-    /// unavailable (provider/LiveKit not configured, or an infra 503). A
-    /// first-party error UI branches on this to show the "voice unavailable"
-    /// state rather than a generic failure.
+    /// unavailable (provider/LiveKit not configured, or an infra 503).
+    /// Branch on this to show a "voice unavailable" state rather than a
+    /// generic failure.
     case voiceDisabled
     /// The server refused the session start with an HTTP rejection that
     /// wasn't a more specific case (auth failure, bad request, …);
@@ -938,6 +1204,9 @@ public enum RealtimeSessionError: Error, LocalizedError, Equatable {
     /// A video publish (stream or screen share) is already active on
     /// this session; remove or stop it before starting another.
     case videoPublishAlreadyActive
+    /// A caller-owned audio stream is already active on this session;
+    /// remove it before starting another.
+    case audioPublishAlreadyActive
     /// The base URL is plain `http` to a non-loopback host; a bearer
     /// credential must not travel over cleartext.
     case insecureBaseURL(String)
@@ -968,6 +1237,8 @@ public enum RealtimeSessionError: Error, LocalizedError, Equatable {
             return "Screen share is unavailable: LiveKit BufferCapturer could not be created."
         case .videoPublishAlreadyActive:
             return "A video publish is already active on this session; remove or stop it before starting another."
+        case .audioPublishAlreadyActive:
+            return "An audio stream is already active on this session; remove it before starting another."
         case .insecureBaseURL(let url):
             return "Realtime base URL must use https (http allowed only for localhost): \(url)"
         }

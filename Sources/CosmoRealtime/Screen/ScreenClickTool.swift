@@ -1,23 +1,16 @@
 import Foundation
 
-/// One model request to click a located element: which element, by the ref
-/// `cosmo_screen_locate` minted for it, and how to click it. Decoded from a
-/// `cosmo_sdk_screen_click` invocation's arguments.
-public struct ScreenClickRequest: Sendable, Equatable {
-    public var ref: ScreenRef
-    public var action: ScreenAction
-
-    public init(ref: ScreenRef, action: ScreenAction) {
-        self.ref = ref
-        self.action = action
-    }
+/// Decoded `cosmo_sdk_screen_click_element` arguments, before the handle is
+/// resolved: the `found_element` the model passed back, and how to click it.
+struct ScreenClickArgs: Sendable, Equatable {
+    var foundElement: String
+    var action: ScreenAction
 }
 
-/// A ``ScreenClickRequest`` whose ref resolved: the element to click, the
-/// capture it was located in (a host re-reads
-/// ``ScreenCapture/context`` from it to check the screen hasn't moved on), and
-/// the click to perform.
-public struct ScreenClick: Sendable {
+/// What a click handler is asked to do: the element the handle resolved to, the
+/// capture it was located in (a host re-reads ``ScreenCapture/context`` from it
+/// to check the screen hasn't moved on), and the click to perform.
+public struct ScreenClickRequest: Sendable {
     public let element: ScreenElement
     public let capture: ScreenCapture
     public let action: ScreenAction
@@ -29,8 +22,8 @@ public struct ScreenClick: Sendable {
     }
 }
 
-/// What a ``SessionConfig/Tool/screenClick(onClick:)`` handler reports back to
-/// the model.
+/// What a ``SessionConfig/Tool/screenClickElement(onClick:)`` handler reports
+/// back to the model.
 ///
 /// Clicking can fail for reasons the model must hear about — the user switched
 /// apps, the window scrolled, the call ended. Answering "clicked" regardless
@@ -63,34 +56,35 @@ public struct ScreenClickOutcome: Sendable, Equatable {
     }
 }
 
-/// `cosmo_sdk_screen_click` — the acting half of the locate-then-act pair.
-/// `cosmo_screen_locate` captures the shared screen, resolves the model's
-/// description against it, and returns candidates each carrying a ref; the
-/// model picks the one it meant and passes that ref here.
+/// `cosmo_sdk_screen_click_element` — the acting half of the locate-then-act
+/// pair. `cosmo_screen_locate` captures the shared screen, resolves the model's
+/// description against it, and returns candidates each carrying a
+/// `found_element` handle; the model picks the one it meant and passes that
+/// handle here.
 ///
 /// It locates nothing — it carries the model's choice to the host, which owns
 /// the click itself. The SDK owns the contract (declaration, typed decode, and
-/// resolving the ref back to the element it addresses).
+/// resolving the handle back to the element it names).
 public enum ScreenClickTool {
     /// Wire name shipped in `tool-invocation` events; a rename is a wire break.
     /// Matches the backend regex `^[a-z][a-z0-9_]{2,63}$` (`client_declared.py`).
-    public static let name = "cosmo_sdk_screen_click"
+    public static let name = "cosmo_sdk_screen_click_element"
 
     /// Tool-group key for backend telemetry + brain-allowlisting.
     public static let group = "screen"
 
     public static var toolDescription: String {
         """
-        Click an element on the shared screen. Takes a ref from cosmo_screen_locate — \
-        pass one back exactly as you received it. Do not construct a ref or edit its \
-        fields; an invented one points at a real control the user did not ask you to click.
+        Click an element on the shared screen. Takes a found_element handle from \
+        cosmo_screen_locate — pass one back exactly as you received it, never one you \
+        assembled yourself.
         """
     }
 
     /// Args JSON-schema in the backend's restricted dialect.
     public static var parametersJSON: String {
         #"""
-        {"type":"object","properties":{"ref":{"type":"object","description":"A ref exactly as cosmo_screen_locate returned it.","properties":{"capture_id":{"type":"string"},"element_idx":{"type":"integer","minimum":0}},"required":["capture_id","element_idx"]},"button":{"type":"string","enum":["left","right"],"description":"'right' opens context menus."},"double":{"type":"boolean","description":"True for a double-click (open a file, select a word)."}},"required":["ref"]}
+        {"type":"object","properties":{"found_element":{"type":"string","description":"A found_element handle exactly as cosmo_screen_locate returned it."},"button":{"type":"string","enum":["left","right"],"description":"'right' opens context menus."},"double":{"type":"boolean","description":"True for a double-click (open a file, select a word)."}},"required":["found_element"]}
         """#
     }
 
@@ -104,13 +98,17 @@ public enum ScreenClickTool {
         )
     }
 
-    /// Decode a `cosmo_sdk_screen_click` invocation's arguments into a typed
-    /// request. Returns `nil` when the ref is absent or malformed, or the button
-    /// is one this SDK has no gesture for — unlike a spotlight's glyph, an
-    /// unrecognized button has no harmless fallback, since guessing which button
-    /// to press is guessing what happens to the user's machine.
-    public static func request(from args: [String: JSONValue]) -> ScreenClickRequest? {
-        guard let ref = ScreenRef.decode(args["ref"]) else { return nil }
+    /// Decode a `cosmo_sdk_screen_click_element` invocation's arguments. Returns
+    /// `nil` when the handle is absent, or the button is one this SDK has no
+    /// gesture for — unlike a highlight's glyph, an unrecognized button has no
+    /// harmless fallback, since guessing which button to press is guessing what
+    /// happens to the user's machine.
+    ///
+    /// The handle itself is not inspected here: it is opaque, so a token the
+    /// model assembled is a miss against the cache rather than a decode error,
+    /// and the model is told to locate again rather than handed a complaint.
+    static func args(from args: [String: JSONValue]) -> ScreenClickArgs? {
+        guard let handle = args["found_element"]?.stringValue, !handle.isEmpty else { return nil }
         let button: ScreenButton
         if let raw = args["button"]?.stringValue {
             guard let parsed = ScreenButton(rawValue: raw) else { return nil }
@@ -118,8 +116,8 @@ public enum ScreenClickTool {
         } else {
             button = .left
         }
-        return ScreenClickRequest(
-            ref: ref,
+        return ScreenClickArgs(
+            foundElement: handle,
             action: ScreenAction(button: button, double: args["double"]?.boolValue ?? false)
         )
     }
@@ -130,52 +128,52 @@ extension SessionConfig.Tool {
     /// ``screenLocate(capture:)`` slot that feeds it:
     ///
     /// ```swift
-    /// tools: [.screenLocate { … }, .screenClick { target in
-    ///     guard stillFocused(target.capture) else {
+    /// tools: [.screenLocate { … }, .screenClickElement { request in
+    ///     guard stillFocused(request.capture) else {
     ///         return .notClicked("the foreground app changed — locate it again")
     ///     }
-    ///     try press(target.element.frame, target.action)
+    ///     try press(request.element.frame, request.action)
     ///     return .clicked
     /// }]
     /// ```
     ///
-    /// The SDK decodes the arguments and resolves the model's ref back to the
-    /// element it addresses; your handler owns the click and the honest answer
-    /// about whether it landed. A ref that no longer resolves — a capture the
+    /// The SDK decodes the arguments and resolves the model's handle back to the
+    /// element it names; your handler owns the click and the honest answer
+    /// about whether it landed. A handle that no longer resolves — a capture the
     /// session never took, or one older than ``ScreenCaptureCache/maxAge`` —
     /// declines before reaching your code, since acting on a snapshot the SDK
     /// cannot produce would be acting blind.
-    public static func screenClick(
-        onClick: @escaping @Sendable (ScreenClick) async throws -> ScreenClickOutcome
+    public static func screenClickElement(
+        onClick: @escaping @Sendable (ScreenClickRequest) async throws -> ScreenClickOutcome
     ) -> SessionConfig.Tool {
-        screenClick(cache: .shared, onClick: onClick)
+        screenClickElement(cache: .shared, onClick: onClick)
     }
 
     /// Cache-injecting variant so tests can drive the pairing on their own clock.
-    static func screenClick(
+    static func screenClickElement(
         cache: ScreenCaptureCache,
-        onClick: @escaping @Sendable (ScreenClick) async throws -> ScreenClickOutcome
+        onClick: @escaping @Sendable (ScreenClickRequest) async throws -> ScreenClickOutcome
     ) -> SessionConfig.Tool {
         .sdkClient(SDKClientTool(
             name: ScreenClickTool.name,
             description: ScreenClickTool.toolDescription,
             parameters: sdkToolParameters(fromJSON: ScreenClickTool.parametersJSON),
             handler: { args in
-                guard let request = ScreenClickTool.request(from: args) else {
+                guard let parsed = ScreenClickTool.args(from: args) else {
                     throw ScreenToolError(
-                        message: "\(ScreenClickTool.name): pass ref {capture_id, element_idx} "
-                            + "exactly as cosmo_screen_locate returned it"
+                        message: "\(ScreenClickTool.name): pass found_element exactly as "
+                            + "cosmo_screen_locate returned it, and button left|right"
                     )
                 }
-                guard let resolved = cache.resolve(request.ref) else {
-                    return ScreenClickOutcome.notClicked(unresolvableRefReason).toolResult
+                guard let resolved = cache.resolve(parsed.foundElement) else {
+                    return ScreenClickOutcome.notClicked(unresolvableHandleReason).toolResult
                 }
-                let click = ScreenClick(
+                let request = ScreenClickRequest(
                     element: resolved.element,
                     capture: resolved.capture,
-                    action: request.action
+                    action: parsed.action
                 )
-                return try await onClick(click).toolResult
+                return try await onClick(request).toolResult
             }
         ))
     }

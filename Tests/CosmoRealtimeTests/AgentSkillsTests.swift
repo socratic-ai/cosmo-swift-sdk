@@ -14,12 +14,12 @@ struct AgentSkillsTests {
         Skill(name: name, description: desc, body: "BODY \(name)")
     }
 
-    private func clientToolNames(_ cfg: SessionConfig) -> [String] {
-        (cfg.tools ?? []).compactMap { if case let .client(n, _, _, _) = $0 { return n }; return nil }
+    private func toolNames(_ cfg: SessionConfig) -> [String] {
+        (cfg.tools ?? []).map(\.name)
     }
 
     private let refundsMenu =
-        "## Skills\nCall load_skill(name) to load private instructions when the conversation reaches the matching path:\n- refunds: handle refunds"
+        "## Skills\nCall cosmo_sdk_load_skill(name) to load private instructions when the conversation reaches the matching path:\n- refunds: handle refunds"
 
     @Test func injectsLoadSkillToolAndAppendsMenuToInstructions() async throws {
         let agent = try Agent(skills: [hotSkill("refunds", "handle refunds")])
@@ -29,11 +29,11 @@ struct AgentSkillsTests {
             config: SessionConfig(instructions: "You are terse."),
             transportFactory: { _ in FakeMCPTransport() }
         ) { cfg in
-            names = self.clientToolNames(cfg)
+            names = self.toolNames(cfg)
             instructions = cfg.instructions
             return try await self.fakeRealtime(cfg)
         }
-        #expect(names == ["load_skill"])
+        #expect(names == ["cosmo_sdk_load_skill"])
         #expect(instructions == "You are terse.\n\n\(refundsMenu)")
         await s.end()
     }
@@ -75,12 +75,12 @@ struct AgentSkillsTests {
             config: SessionConfig(instructions: "You are Cosmo.", tools: [defaultTool]),
             transportFactory: { _ in FakeMCPTransport() }
         ) { cfg in
-            names = self.clientToolNames(cfg)
+            names = self.toolNames(cfg)
             instructions = cfg.instructions
             return try await self.fakeRealtime(cfg)
         }
         #expect(instructions == "You are Cosmo.\n\n\(refundsMenu)")
-        #expect(names == ["web_search", "load_skill"])
+        #expect(names == ["web_search", "cosmo_sdk_load_skill"])
         await s.end()
     }
 
@@ -105,7 +105,7 @@ struct AgentSkillsTests {
         let agent = try Agent(skills: [hotSkill("refunds")])
         var handler: ClientToolHandler?
         let s = try await agent.start(config: SessionConfig(), transportFactory: { _ in FakeMCPTransport() }) { cfg in
-            if case let .client(_, _, _, h)? = (cfg.tools ?? []).first { handler = h }
+            if case let .sdkClient(tool)? = (cfg.tools ?? []).first { handler = tool.handler }
             return try await self.fakeRealtime(cfg)
         }
         let out = try await handler?(["name": .string("refunds")])
@@ -127,10 +127,10 @@ struct AgentSkillsTests {
         }
         var names: [String] = []
         let agentSession = try await agent.start(config: SessionConfig(), transportFactory: mcpFactory) { cfg in
-            names = self.clientToolNames(cfg)
+            names = self.toolNames(cfg)
             return try await self.fakeRealtime(cfg)
         }
-        #expect(names == ["caller", "load_skill", "mcp__fs__read"])
+        #expect(names == ["caller", "cosmo_sdk_load_skill", "mcp__fs__read"])
         await agentSession.end()
     }
 
@@ -150,10 +150,10 @@ struct AgentSkillsTests {
         }
         var names: [String] = []
         let s = try await agent.start(config: SessionConfig(), transportFactory: mcpFactory) { cfg in
-            names = self.clientToolNames(cfg)
+            names = self.toolNames(cfg)
             return try await self.fakeRealtime(cfg)
         }
-        #expect(names == ["mcp__fs__read", "load_skill"])  // the MCP read is dropped (name collision)
+        #expect(names == ["mcp__fs__read", "cosmo_sdk_load_skill"])  // the MCP read is dropped (name collision)
         await s.end()
     }
 
@@ -172,26 +172,51 @@ struct AgentSkillsTests {
             config: SessionConfig(tools: [defaultTool]),
             transportFactory: mcpFactory
         ) { cfg in
-            names = self.clientToolNames(cfg)
+            names = self.toolNames(cfg)
             return try await self.fakeRealtime(cfg)
         }
         #expect(names == ["mcp__fs__read"])  // inherited tool kept; colliding MCP read dropped
         await s.end()
     }
 
-    @Test func callerToolNamedLoadSkillIsNotDuplicated() async throws {
-        // If the caller already declares a `load_skill` tool, the auto-generated
-        // skill tool must not add a second entry under the same name.
+    @Test func callerToolNamedReservedNameIsRejected() async throws {
+        // The SDK's load-skill tool now lives in the reserved cosmo_sdk_
+        // namespace, so a caller tool taking that name is rejected at session
+        // start — it never silently drops the skills.
         let caller = SessionConfig.Tool.client(
             name: loadSkillToolName, description: "caller's own", parameters: ["type": .string("object")], handler: { _ in [:] }
         )
         let agent = try Agent(tools: [caller], skills: [hotSkill("refunds")])
+        await #expect {
+            _ = try await agent.start(config: SessionConfig(), transportFactory: { _ in FakeMCPTransport() }) { cfg in
+                try await self.fakeRealtime(cfg)
+            }
+        } throws: { error in
+            guard let error = error as? RealtimeSessionError else { return false }
+            return (error.errorDescription ?? "").contains("reserved")
+        }
+    }
+
+    @Test func callerToolNamedLoadSkillCoexistsWithSkills() async throws {
+        // `load_skill` is now an ordinary caller name — the SDK moved its tool
+        // into the reserved namespace — so a caller tool taking it is left in
+        // place and the skills' own cosmo_sdk_load_skill tool and menu still attach.
+        let caller = SessionConfig.Tool.client(
+            name: "load_skill", description: "caller's own", parameters: ["type": .string("object")], handler: { _ in [:] }
+        )
+        let agent = try Agent(tools: [caller], skills: [hotSkill("refunds", "handle refunds")])
         var names: [String] = []
-        let s = try await agent.start(config: SessionConfig(), transportFactory: { _ in FakeMCPTransport() }) { cfg in
-            names = self.clientToolNames(cfg)
+        var instructions: String?
+        let s = try await agent.start(
+            config: SessionConfig(instructions: "You are Alex."),
+            transportFactory: { _ in FakeMCPTransport() }
+        ) { cfg in
+            names = self.toolNames(cfg)
+            instructions = cfg.instructions
             return try await self.fakeRealtime(cfg)
         }
-        #expect(names == [loadSkillToolName])  // single entry; no duplicate reaches the wire
+        #expect(names == ["load_skill", "cosmo_sdk_load_skill"])
+        #expect(instructions == "You are Alex.\n\n\(refundsMenu)")
         await s.end()
     }
 }

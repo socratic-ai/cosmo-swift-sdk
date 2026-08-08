@@ -11,13 +11,18 @@ import os
 /// pc_connected → room_connected`, i.e. the full signaling-vs-ICE
 /// breakdown of the SDK's `room_ms` phase. `Span.description` already
 /// formats per-event deltas + total, so we just forward it.
-public final class CosmoLiveKitTracer: Tracing, Sendable {
+///
+/// Internal on purpose: it conforms to LiveKit's `Tracing` and traffics in
+/// `Span`, so making it public would put the vendor's types on our surface
+/// and pin consumers to this transport. ``RealtimeSession/installConnectTracing()``
+/// is the vendor-free way in.
+final class CosmoLiveKitTracer: Tracing, Sendable {
     private static let log = Logger(subsystem: CosmoRealtimeLog.subsystem, category: "livekit-trace")
 
-    public init() {}
+    init() {}
 
     @discardableResult
-    public func beginSpan(_ name: String) -> Span {
+    func beginSpan(_ name: String) -> Span {
         let span = Span(label: name)
         span.onEnd = { span in
             // .notice so connect spans survive in `log show` without a live stream.

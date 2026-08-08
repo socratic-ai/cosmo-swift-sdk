@@ -88,19 +88,182 @@ struct ClientToolDispatchTests {
         #expect(fields["error"] == .string("tool blew up"))
     }
 
-    @Test("an oversized success result fails closed as an error reply")
+    @Test("an oversized success result is delivered truncated, not lost")
     func oversizedResult() async {
         let big = String(repeating: "x", count: 20 * 1024)
-        let handler: ClientToolHandler = { _ in ["blob": .string(big)] }
-        let fields = decode(await invokeClientToolHandler(
-            handler, tool: "test_tool", payload: "{}", hooks: nil, sessionId: nil
-        ))
-        #expect(fields["ok"] == .bool(false))
-        if case .string(let message)? = fields["error"] {
-            #expect(message.contains("reply size limit"))
-        } else {
-            Issue.record("expected an error string")
+        let handler: ClientToolHandler = { _ in
+            ["blob": .string(big), "unit": .string("celsius")]
         }
+        let reply = await invokeClientToolHandler(
+            handler, tool: "test_tool", payload: "{}", hooks: nil, sessionId: nil
+        )
+        #expect(reply.utf8.count <= ClientToolReply.maxBytes)
+        let fields = decode(reply)
+        #expect(fields["ok"] == .bool(true))
+        #expect(fields["error"] == .null)
+        guard case .object(let result)? = fields["result"] else {
+            Issue.record("expected a result object")
+            return
+        }
+        // The partial answer survives, and the marker tells the model it is partial.
+        guard case .object(let marker)? = result[ClientToolReply.truncationMarkerKey] else {
+            Issue.record("expected a truncation marker object")
+            return
+        }
+        #expect(marker["note"] == .string(ClientToolReply.truncationMarkerNote))
+        if case .int(let kept)? = marker["kept_bytes"],
+            case .int(let original)? = marker["original_bytes"] {
+            #expect(original > kept && kept > 0)
+        } else {
+            Issue.record("expected an integer byte pair on the marker")
+        }
+        #expect(result["unit"] == .string("celsius"))
+        guard case .string(let blob)? = result["blob"] else {
+            Issue.record("expected the oversized field to survive as a truncated string")
+            return
+        }
+        #expect(blob.hasPrefix("xxx"))
+        #expect(blob.hasSuffix(ClientToolReply.truncationSuffix))
+        #expect(blob.utf8.count < big.utf8.count)
+    }
+
+    /// The shape the never-grow rule exists for: short strings near the
+    /// suffix's own length beside one long string.
+    private static func interiorWindowResult() -> [String: JSONValue] {
+        var result: [String: JSONValue] = [:]
+        for i in 0..<20 { result["k\(i)"] = .string(String(repeating: "a", count: 8)) }
+        result["big"] = .string(String(repeating: "b", count: 32_768))
+        result["pad"] = .array(Array(repeating: .int(0), count: 4_905))
+        return result
+    }
+
+    @Test("many short strings beside a long one keep every entry")
+    func interiorWindowKeepsEveryEntry() {
+        let result = Self.interiorWindowResult()
+        let built = clientToolSuccessReply(result)
+        #expect(built.truncated)
+        #expect(built.reply.utf8.count <= ClientToolReply.maxBytes)
+        // Nearly the whole budget is spent on the answer, not surrendered.
+        #expect(built.reply.utf8.count > ClientToolReply.maxBytes - 512)
+        guard case .object(let fields)? = decode(built.reply)["result"] else {
+            Issue.record("expected a result object")
+            return
+        }
+        #expect(
+            Set(fields.keys)
+                == Set(result.keys).union([ClientToolReply.truncationMarkerKey])
+        )
+    }
+
+    /// The property ``clientToolSuccessReply``'s binary search prunes on.
+    /// Without it a smaller allowance can yield a larger reply, and the search
+    /// steps over the fitting window and reports that nothing fits.
+    @Test("the shortened size never falls as the allowance rises")
+    func shortenedSizeRisesMonotonically() {
+        let result = Self.interiorWindowResult()
+        let sizes = (0..<120).map { allowance in
+            ClientToolReply.envelope(
+                ok: true,
+                result: {
+                    guard case .object(let shrunk) = shrinkStrings(
+                        .object(result), maxScalars: allowance
+                    ) else { return [:] }
+                    return shrunk
+                }()
+            ).utf8.count
+        }
+        #expect(sizes == sizes.sorted())
+    }
+
+    /// Astral scalars survive whole. ``String/prefix(_:)`` counts grapheme
+    /// clusters and would land somewhere the sibling SDKs do not.
+    @Test("an error message is cut on a scalar boundary")
+    func errorMessageCutsOnScalarBoundary() {
+        let reply = clientToolErrorReply(String(repeating: "🙂", count: 20_000))
+        #expect(reply.utf8.count <= ClientToolReply.maxBytes)
+        guard case .string(let message)? = decode(reply)["error"] else {
+            Issue.record("expected an error string")
+            return
+        }
+        #expect(message.hasSuffix(ClientToolReply.truncationSuffix))
+        let kept = String(message.dropLast(ClientToolReply.truncationSuffix.count))
+        #expect(kept == String(repeating: "🙂", count: kept.unicodeScalars.count))
+    }
+
+    /// Ranking on the value alone drops the wrong entry, then runs out of
+    /// entries and returns nothing but the marker.
+    @Test("a long key is weighed with its value when dropping entries")
+    func longKeyIsWeighedWithItsValue() {
+        let longKey = String(repeating: "K", count: 15_200)
+        let built = clientToolSuccessReply([
+            longKey: .int(0),
+            "x": .array(Array(repeating: .int(0), count: 100)),
+        ])
+        #expect(built.reply.utf8.count <= ClientToolReply.maxBytes)
+        guard case .object(let fields)? = decode(built.reply)["result"] else {
+            Issue.record("expected a result object")
+            return
+        }
+        #expect(fields["x"] == .array(Array(repeating: .int(0), count: 100)))
+        #expect(fields[longKey] == nil)
+    }
+
+    @Test("a result that is oversized without long strings drops entries, biggest first")
+    func oversizedNonStringResult() async {
+        // No string is long enough to shrink — the bytes are in the array.
+        let numbers = JSONValue.array((0..<4000).map { .int(1_000_000 + $0) })
+        let handler: ClientToolHandler = { _ in ["rows": numbers, "count": .int(4000)] }
+        let reply = await invokeClientToolHandler(
+            handler, tool: "test_tool", payload: "{}", hooks: nil, sessionId: nil
+        )
+        #expect(reply.utf8.count <= ClientToolReply.maxBytes)
+        let fields = decode(reply)
+        #expect(fields["ok"] == .bool(true))
+        guard case .object(let result)? = fields["result"] else {
+            Issue.record("expected a result object")
+            return
+        }
+        #expect(result["rows"] == nil)
+        #expect(result["count"] == .int(4000))
+        guard case .object(let marker)? = result[ClientToolReply.truncationMarkerKey] else {
+            Issue.record("expected a truncation marker object")
+            return
+        }
+        #expect(marker["note"] == .string(ClientToolReply.truncationMarkerNote))
+        // The dropped array is the whole overflow, so almost nothing survived.
+        if case .int(let kept)? = marker["kept_bytes"],
+            case .int(let original)? = marker["original_bytes"] {
+            #expect(original > 10 * kept)
+        } else {
+            Issue.record("expected an integer byte pair on the marker")
+        }
+    }
+
+    @Test("a result that fits is passed through unchanged and unmarked")
+    func fittingResultIsNotMarked() {
+        let built = clientToolSuccessReply(["temp_c": .double(21.5)])
+        #expect(!built.truncated)
+        let fields = decode(built.reply)
+        #expect(fields["result"] == .object(["temp_c": .double(21.5)]))
+    }
+
+    @Test("an oversized ack note is truncated so the deferred reply fits the cap")
+    func oversizedDeferredNote() {
+        let reply = clientToolDeferredReply(
+            jobId: "job-1", note: String(repeating: "n", count: 30 * 1024)
+        )
+        #expect(reply.utf8.count <= ClientToolReply.maxBytes)
+        let fields = decode(reply)
+        #expect(fields["ok"] == .bool(true))
+        #expect(fields["deferred"] == .bool(true))
+        #expect(fields["job_id"] == .string("job-1"))
+        guard case .object(let result)? = fields["result"],
+            case .string(let note)? = result["note"]
+        else {
+            Issue.record("expected a truncated ack note")
+            return
+        }
+        #expect(note.hasSuffix(ClientToolReply.truncationSuffix))
     }
 
     @Test("only the matching agent participant may invoke a client tool")
@@ -150,11 +313,11 @@ struct ClientToolDispatchTests {
     @Test("an oversized error message is truncated to fit the reply cap")
     func errorTruncation() {
         let reply = clientToolErrorReply(String(repeating: "e", count: 30 * 1024))
-        #expect(reply.utf8.count <= 15 * 1024)
+        #expect(reply.utf8.count <= ClientToolReply.maxBytes)
         let fields = decode(reply)
         #expect(fields["ok"] == .bool(false))
         if case .string(let message)? = fields["error"] {
-            #expect(message.hasSuffix("… [truncated]"))
+            #expect(message.hasSuffix(ClientToolReply.truncationSuffix))
         } else {
             Issue.record("expected a truncated error string")
         }
@@ -228,8 +391,8 @@ struct ClientToolDispatchTests {
         }
     }
 
-    @Test("oversized result fires PostToolUse with .error (not .ok)")
-    func hookPostToolUseOversizedIsError() async throws {
+    @Test("oversized result fires PostToolUse with .ok carrying the untruncated result")
+    func hookPostToolUseOversizedIsOk() async throws {
         let big = String(repeating: "x", count: 20 * 1024)
         let handler: ClientToolHandler = { _ in ["blob": .string(big)] }
         let postOutcomeBox = CaptureBox<ToolOutcome>()
@@ -239,12 +402,14 @@ struct ClientToolDispatchTests {
         let fields = decode(await invokeClientToolHandler(
             handler, tool: "my_tool", payload: "{}", hooks: HookEngine(registry), sessionId: "s1"
         ))
-        #expect(fields["ok"] == .bool(false))
+        #expect(fields["ok"] == .bool(true))
+        // The cap is a transport property; a local observer sees what the
+        // handler actually returned, not what fit on the wire.
         let outcome = await postOutcomeBox.value
-        if case .error(let msg)? = outcome {
-            #expect(msg.contains("reply size limit"))
+        if case .ok(let result)? = outcome {
+            #expect(result?["blob"] == .string(big))
         } else {
-            Issue.record("expected .error outcome for oversized result, got \(String(describing: outcome))")
+            Issue.record("expected .ok outcome for oversized result, got \(String(describing: outcome))")
         }
     }
 

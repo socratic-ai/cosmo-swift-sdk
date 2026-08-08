@@ -5,10 +5,9 @@ extension RealtimeSession {
     /// Place an outbound phone call into this running session.
     ///
     /// No start-time flag is needed — the server derives phone handling
-    /// from the dialed leg itself; declare the ``cosmo.end_call`` server tool
-    /// if the model should be able to hang up. POSTs ``phoneNumber`` (and the
+    /// from the dialed leg itself. POSTs ``phoneNumber`` (and the
     /// optional ``callerNumber``) to the session's dial endpoint and returns
-    /// the server-minted ``dial_id``.
+    /// the server-minted ``dial_id``. To end the call, call ``end()``.
     ///
     /// Both numbers are validated as E.164 (``+`` followed by 8–15 digits)
     /// before the request. Throws ``RealtimeSessionError/invalidPayload(_:)`` on
@@ -28,7 +27,7 @@ extension RealtimeSession {
 
         let request: URLRequest
         do {
-            request = try Self._makeDialRequest(
+            request = try await Self._makeDialRequest(
                 options: options,
                 sessionId: sessionId,
                 phoneNumber: phoneNumber,
@@ -111,16 +110,15 @@ extension RealtimeSession {
         sessionId: String,
         phoneNumber: String,
         callerNumber: String?
-    ) throws -> URLRequest {
+    ) async throws -> URLRequest {
         var request = URLRequest(
             url: options.baseURL.appending(
                 path: "api/v1/external/realtime/session/\(sessionId)/dial"
             )
         )
         request.httpMethod = "POST"
-        request.setValue("Bearer \(options.credential.bearerValue)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(try await options.bearerToken())", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        options.clientIdentity?.apply(to: &request)
         request.httpBody = try JSONEncoder().encode(
             DialRequestBody(phoneNumber: phoneNumber, callerNumber: callerNumber)
         )

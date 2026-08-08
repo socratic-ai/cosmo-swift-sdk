@@ -18,13 +18,18 @@ enum ScreenFixtures {
         )
     }
 
-    static func ref(_ captureID: String, _ index: Int) -> [String: JSONValue] {
-        ["capture_id": .string(captureID), "element_idx": .int(index)]
+    static func handle(_ captureID: String, _ index: Int) -> JSONValue {
+        .string(FoundElementHandle.encode(captureID: captureID, elementIndex: index))
     }
+
 }
 
 private final class Published: @unchecked Sendable {
     var payloads: [(data: Data, topic: String)] = []
+}
+
+private final class Asked: @unchecked Sendable {
+    var requests: [ScreenCaptureRequest] = []
 }
 
 /// Mutable wall clock so the TTL step runs without sleeping.
@@ -74,6 +79,96 @@ struct ScreenLocateSlotTests {
         #expect(cache.get("cap1")?.elements.count == 2)
     }
 
+    @Test("an element's descriptors are clamped, never shipped whole")
+    func descriptorsAreClamped() throws {
+        // A focused text area holding a document used to reach the backend
+        // whole, where a length cap rejected the *entire* capture.
+        let capture = ScreenCapture(
+            imageJPEG: Data([0xff, 0xd8]),
+            elements: [
+                ScreenElement(
+                    index: 0, role: "AXTextArea", title: nil, label: nil,
+                    value: String(repeating: "v", count: 40_000),
+                    frame: CGRect(x: 0, y: 0, width: 20, height: 20)
+                )
+            ],
+            context: ScreenCaptureContext(appPID: 7, windowFrame: nil)
+        )
+
+        let data = try ScreenLocateTool.encodePayload(captureID: "cap1", capture: capture)
+        let json = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let element = try #require((json["ax_elements"] as? [[String: Any]])?.first)
+        #expect((element["value"] as? String)?.count == ScreenLocateTool.valueMaxChars)
+    }
+
+    @Test("a named element ships no value — the screenshot already shows it")
+    func namedElementDropsValue() throws {
+        let capture = ScreenCapture(
+            imageJPEG: Data([0xff, 0xd8]),
+            elements: [
+                ScreenElement(
+                    index: 0, role: "AXTextField", title: "Email", label: nil,
+                    value: "someone@example.com",
+                    frame: CGRect(x: 0, y: 0, width: 20, height: 20)
+                )
+            ],
+            context: ScreenCaptureContext(appPID: 7, windowFrame: nil)
+        )
+
+        let data = try ScreenLocateTool.encodePayload(captureID: "cap1", capture: capture)
+        let json = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let element = try #require((json["ax_elements"] as? [[String: Any]])?.first)
+        #expect(element["value"] == nil)
+        #expect(element["title"] as? String == "Email")
+    }
+
+    @Test("want_elements:false reaches the handler and strips the list from the payload")
+    func pixelsOnlyCaptureSkipsElements() async throws {
+        let published = Published()
+        let asked = Asked()
+        let slot = try #require(
+            captureSlot(
+                .screenLocate(cache: ScreenCaptureCache()) { request in
+                    asked.requests.append(request)
+                    return ScreenFixtures.capture()
+                })
+        )
+        slot.bindPublish { data, topic in published.payloads.append((data, topic)) }
+
+        _ = try await slot.handler()(
+            ["capture_id": .string("cap1"), "want_elements": .bool(false)]
+        )
+
+        #expect(asked.requests == [ScreenCaptureRequest(wantsElements: false)])
+        let sent = try #require(published.payloads.first)
+        let json = try #require(
+            try JSONSerialization.jsonObject(with: sent.data) as? [String: Any]
+        )
+        #expect((json["ax_elements"] as? [[String: Any]])?.isEmpty == true)
+        #expect(json["image_b64"] as? String != nil)
+    }
+
+    @Test("a server that sends no want_elements is answered with the list")
+    func missingWantElementsStillWalks() async throws {
+        let asked = Asked()
+        let slot = try #require(
+            captureSlot(
+                .screenLocate(cache: ScreenCaptureCache()) { request in
+                    asked.requests.append(request)
+                    return ScreenFixtures.capture()
+                })
+        )
+        slot.bindPublish { _, _ in }
+
+        _ = try await slot.handler()(["capture_id": .string("cap1")])
+
+        #expect(asked.requests == [ScreenCaptureRequest(wantsElements: true)])
+    }
+
     @Test("a host that declines to capture says so instead of erroring")
     func unavailableCaptureIsBenign() async throws {
         let slot = try #require(
@@ -104,27 +199,27 @@ struct ScreenLocateSlotTests {
     }
 }
 
-@Suite("screen renderers resolve a ref")
+@Suite("screen renderers resolve a found_element handle")
 struct ScreenRendererResolutionTests {
     private func seeded(_ cache: ScreenCaptureCache, elementCount: Int = 2) {
         cache.put("cap1", ScreenFixtures.capture(elementCount: elementCount))
     }
 
-    @Test("a click reaches the host with the element the ref addresses")
+    @Test("a click reaches the host with the element the handle names")
     func clickResolvesTheElement() async throws {
         let cache = ScreenCaptureCache()
         seeded(cache)
-        let seen = LockedBox<ScreenClick?>(nil)
+        let seen = LockedBox<ScreenClickRequest?>(nil)
         let handler = try #require(
             renderer(
-                .screenClick(cache: cache) { click in
-                    seen.value = click
+                .screenClickElement(cache: cache) { request in
+                    seen.value = request
                     return .clicked
                 })
         )
 
         let reply = try await handler([
-            "ref": .object(ScreenFixtures.ref("cap1", 1)),
+            "found_element": ScreenFixtures.handle("cap1", 1),
             "button": .string("right"),
             "double": .bool(true),
         ])
@@ -138,87 +233,87 @@ struct ScreenRendererResolutionTests {
         #expect(click.capture.elements.count == 2)
     }
 
-    @Test("a spotlight reaches the host with the element the ref addresses")
+    @Test("a highlight reaches the host with the element the handle names")
     func highlightResolvesTheElement() async throws {
         let cache = ScreenCaptureCache()
         seeded(cache)
-        let seen = LockedBox<ScreenHighlight?>(nil)
+        let seen = LockedBox<ScreenHighlightRequest?>(nil)
         let handler = try #require(
             renderer(
-                .screenHighlight(cache: cache) { highlight in
-                    seen.value = highlight
-                    return .shown
+                .screenHighlightElement(cache: cache) { request in
+                    seen.value = request
+                    return .landedOnControl
                 })
         )
 
         let reply = try await handler([
-            "ref": .object(ScreenFixtures.ref("cap1", 0)),
+            "found_element": ScreenFixtures.handle("cap1", 0),
             "label": .string("Save"),
             "placement": .string("top"),
             "interaction": .string("press_hold"),
         ])
 
-        #expect(reply == ["shown": .bool(true)])
+        #expect(reply == ["shown": .bool(true), "exact": .bool(true)])
         let highlight = try #require(seen.value)
         #expect(highlight.element.index == 0)
         #expect(highlight.label == "Save")
         #expect(highlight.placement == .top)
-        #expect(highlight.affordance == .pressHold)
+        #expect(highlight.interaction == .pressHold)
     }
 
-    /// Each of these is a ref the SDK cannot turn into a snapshot, and every one
+    /// Each of these is a handle the SDK cannot turn into a snapshot, and every one
     /// is answered rather than thrown: the model can locate again, where a tool
     /// error just ends the attempt.
     @Test(
-        "an unresolvable ref declines instead of erroring",
+        "an unresolvable handle declines instead of erroring",
         arguments: [("nope", 0), ("cap1", 9)]
     )
-    func unresolvableRefsDecline(captureID: String, index: Int) async throws {
+    func unresolvableHandlesDecline(captureID: String, index: Int) async throws {
         let cache = ScreenCaptureCache()
         seeded(cache)
         let clickHandler = try #require(
             renderer(
-                .screenClick(cache: cache) { _ in
+                .screenClickElement(cache: cache) { _ in
                     Issue.record("the host must not be reached")
                     return .clicked
                 })
         )
         let highlightHandler = try #require(
             renderer(
-                .screenHighlight(cache: cache) { _ in
+                .screenHighlightElement(cache: cache) { _ in
                     Issue.record("the host must not be reached")
-                    return .shown
+                    return .landedOnControl
                 })
         )
-        let ref = JSONValue.object(ScreenFixtures.ref(captureID, index))
+        let handle = ScreenFixtures.handle(captureID, index)
 
-        let clicked = try await clickHandler(["ref": ref])
+        let clicked = try await clickHandler(["found_element": handle])
         #expect(clicked["clicked"] == .bool(false))
-        #expect(clicked["reason"] == .string(unresolvableRefReason))
+        #expect(clicked["reason"] == .string(unresolvableHandleReason))
 
-        let shown = try await highlightHandler(["ref": ref, "label": .string("Save")])
+        let shown = try await highlightHandler(["found_element": handle, "label": .string("Save")])
         #expect(shown["shown"] == .bool(false))
-        #expect(shown["reason"] == .string(unresolvableRefReason))
+        #expect(shown["reason"] == .string(unresolvableHandleReason))
     }
 
-    @Test("a ref older than the cache's window declines")
-    func expiredRefDeclines() async throws {
+    @Test("a handle older than the cache's window declines")
+    func expiredHandleDeclines() async throws {
         let clock = TestClock()
         let cache = ScreenCaptureCache(now: { clock.now })
         seeded(cache)
         let handler = try #require(
             renderer(
-                .screenClick(cache: cache) { _ in
-                    Issue.record("an expired ref must not reach the host")
+                .screenClickElement(cache: cache) { _ in
+                    Issue.record("an expired handle must not reach the host")
                     return .clicked
                 })
         )
 
         clock.now += ScreenCaptureCache.maxAge + 1
-        let reply = try await handler(["ref": .object(ScreenFixtures.ref("cap1", 0))])
+        let reply = try await handler(["found_element": ScreenFixtures.handle("cap1", 0)])
 
         #expect(reply["clicked"] == .bool(false))
-        #expect(reply["reason"] == .string(unresolvableRefReason))
+        #expect(reply["reason"] == .string(unresolvableHandleReason))
     }
 
     @Test("a host decline carries its own reason through")
@@ -227,12 +322,12 @@ struct ScreenRendererResolutionTests {
         seeded(cache)
         let handler = try #require(
             renderer(
-                .screenClick(cache: cache) { _ in
+                .screenClickElement(cache: cache) { _ in
                     .notClicked("the foreground app changed — locate it again")
                 })
         )
 
-        let reply = try await handler(["ref": .object(ScreenFixtures.ref("cap1", 0))])
+        let reply = try await handler(["found_element": ScreenFixtures.handle("cap1", 0)])
 
         #expect(reply["clicked"] == .bool(false))
         #expect(reply["reason"] == .string("the foreground app changed — locate it again"))
@@ -242,7 +337,7 @@ struct ScreenRendererResolutionTests {
     func malformedArgumentsThrow() async throws {
         let cache = ScreenCaptureCache()
         seeded(cache)
-        let handler = try #require(renderer(.screenClick(cache: cache) { _ in .clicked }))
+        let handler = try #require(renderer(.screenClickElement(cache: cache) { _ in .clicked }))
 
         await #expect(throws: ScreenToolError.self) {
             _ = try await handler(["button": .string("left")])
@@ -251,15 +346,15 @@ struct ScreenRendererResolutionTests {
 }
 
 @Suite("region spotlight")
-struct HighlightRegionToolTests {
+struct ScreenHighlightBoxToolTests {
     @Test("the model's own box needs no capture behind it")
     func drawsWithoutACache() async throws {
-        let seen = LockedBox<HighlightRegionRequest?>(nil)
+        let seen = LockedBox<ScreenHighlightBoxRequest?>(nil)
         let handler = try #require(
             renderer(
-                .highlightRegion { request in
+                .screenHighlightBox { request in
                     seen.value = request
-                    return .landedExactly
+                    return .landedOnControl
                 })
         )
 
@@ -271,28 +366,28 @@ struct HighlightRegionToolTests {
             "element_role": .string("AXButton"),
         ])
 
-        #expect(reply == ["shown": .bool(true), "confidence": .string("high")])
+        #expect(reply == ["shown": .bool(true), "exact": .bool(true)])
         let request = try #require(seen.value)
-        #expect(request.region == ScreenRegion(x: 0.1, y: 0.2, width: 0.3, height: 0.4))
-        #expect(request.element == ScreenElementHint(title: "Files changed", role: "AXButton"))
+        #expect(request.box == ScreenBox(x: 0.1, y: 0.2, width: 0.3, height: 0.4))
+        #expect(request.elementGuess == ScreenElementHint(title: "Files changed", role: "AXButton"))
     }
 
-    @Test("a mark that only landed on the estimate reports low confidence")
+    @Test("a highlight that only landed on the estimate reports inexact")
     func estimateReportsLowConfidence() async throws {
-        let handler = try #require(renderer(.highlightRegion { _ in .landedOnEstimate }))
+        let handler = try #require(renderer(.screenHighlightBox { _ in .landedOnEstimate }))
 
         let reply = try await handler([
             "x": .double(0), "y": .double(0), "width": .double(1), "height": .double(1),
             "label": .string("Save"),
         ])
 
-        #expect(reply == ["shown": .bool(true), "confidence": .string("low")])
+        #expect(reply == ["shown": .bool(true), "exact": .bool(false)])
     }
 
-    @Test("a decline carries its reason and claims no confidence")
+    @Test("a decline carries its reason and claims no exactness")
     func declineCarriesItsReason() async throws {
         let handler = try #require(
-            renderer(.highlightRegion { _ in .notShown("the user stopped sharing their screen") })
+            renderer(.screenHighlightBox { _ in .notShown("the user stopped sharing their screen") })
         )
 
         let reply = try await handler([

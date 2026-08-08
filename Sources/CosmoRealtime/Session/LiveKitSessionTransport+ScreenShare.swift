@@ -141,13 +141,9 @@ extension LiveKitSessionTransport {
                     // Reconcile the completed publish against ``stopScreenShare``
                     // (and stop + restart), which can clear or REPLACE state
                     // during the publish await. See ``reconcileScreenSharePublish``
-                    // for why the enable-then-expose ordering is load-bearing.
+                    // for who owns teardown in each case.
                     await self.reconcileScreenSharePublish(
                         stillCurrent: { self.screenShareLock.withLock { $0 === s } },
-                        // Collect LiveKit's outbound video QoE (fps, encode
-                        // time, CPU/bandwidth quality-limitation) via the same
-                        // observer the audio tracks use.
-                        enableStats: { await self.enableQoEStats(on: s.track) },
                         // Adopt the publication into state. Identity check, not
                         // nil check: adopting a stale publication into a newer
                         // share's state would hand that share a track it never
@@ -160,7 +156,6 @@ extension LiveKitSessionTransport {
                                 return true
                             }
                         },
-                        disableStats: { await self.disableQoEStats(on: s.track) },
                         unpublish: { try? await room.localParticipant.unpublish(publication: pub) }
                     )
                 } catch {
@@ -195,19 +190,6 @@ extension LiveKitSessionTransport {
         guard let state else { return }
         state.publishTask?.cancel()
         guard let publication = state.publication else { return }
-        // Stop the stats timer *before* the sender leaves the peer connection.
-        // LiveKit's `unpublish` removes the RTP sender but leaves the track's
-        // ~1 Hz statistics timer running against it, and only cancels timers on
-        // room disconnect — so the next tick calls `GetStats` on a sender the
-        // peer connection no longer owns and WebRTC aborts the process.
-        //
-        // Known residual (not closable client-side on LiveKit 2.14.1):
-        // `set(reportStatistics: false)` cancels the timer but does NOT drain a
-        // callback already inside `GetStats`. If stop lands within the in-flight
-        // window of a tick (~ms out of the 1 s period), that call can still race
-        // `unpublish`. This shrinks the crash from every mid-call stop to that
-        // sliver; fully closing it needs an awaitable stats-shutdown upstream.
-        await disableQoEStats(on: state.track)
         try? await room?.localParticipant.unpublish(publication: publication)
     }
 
@@ -242,33 +224,22 @@ extension LiveKitSessionTransport {
     /// that a concurrent ``stopScreenShare`` (or stop + restart) may have
     /// cleared or replaced during the publish await. Side effects are
     /// injected so the ordering is unit-testable offline — the real path
-    /// needs a live SFU, and the crash it prevents needs a real RTP sender.
+    /// needs a live SFU.
     ///
-    /// The ordering is the whole fix. ``enableStats`` arms LiveKit's ~1 Hz
-    /// per-track stats timer; ``stopScreenShare`` disarms it *before*
-    /// unpublishing so it never ticks against a removed sender (the crash
-    /// this file exists to prevent). If stats were ever enabled *after* stop
-    /// disabled them, that crash returns. Because ``stopScreenShare`` keys off
-    /// the publication, enabling stats *before* the publication is exposed
-    /// makes stop a no-op until we are done — so no stop can slip a disable
-    /// between our enable and the unpublish. If a stop nonetheless replaced
-    /// the share while stats were enabling, ``adopt`` fails and this task owns
-    /// teardown: stop never saw this publication, so it neither disabled these
-    /// stats nor unpublished this sender.
+    /// ``stopScreenShare`` keys off the publication, so a stop is a no-op
+    /// until ``adopt`` exposes it. If a stop replaced the share first,
+    /// ``adopt`` fails and this task owns teardown — stop never saw this
+    /// publication, so it never unpublished this sender.
     nonisolated func reconcileScreenSharePublish(
         stillCurrent: () -> Bool,
-        enableStats: () async -> Void,
         adopt: () -> Bool,
-        disableStats: () async -> Void,
         unpublish: () async -> Void
     ) async {
         guard stillCurrent() else {
             await unpublish()
             return
         }
-        await enableStats()
         guard adopt() else {
-            await disableStats()
             await unpublish()
             return
         }

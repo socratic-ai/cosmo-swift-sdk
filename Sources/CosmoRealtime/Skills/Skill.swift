@@ -1,7 +1,7 @@
 import Foundation
 
 /// One skill (the Agent Skills standard): ``name`` + ``description`` are the
-/// resident routing signal; ``body`` is loaded on demand via ``load_skill``.
+/// resident routing signal; ``body`` is loaded on demand via ``cosmo_sdk_load_skill``.
 public struct Skill: Sendable, Equatable {
     public let name: String
     public let description: String
@@ -110,7 +110,7 @@ public func resolveSkills(_ skills: [Skill]) throws -> [Skill] {
 /// The resident prompt menu; empty when there are no skills.
 public func skillsMenuText(_ skills: [Skill]) -> String {
     if skills.isEmpty { return "" }
-    let header = "## Skills\nCall load_skill(name) to load private instructions when the conversation reaches the matching path:"
+    let header = "## Skills\nCall cosmo_sdk_load_skill(name) to load private instructions when the conversation reaches the matching path:"
     return header + "\n" + skills.map { "- \($0.name): \(singleLine($0.description))" }.joined(separator: "\n")
 }
 

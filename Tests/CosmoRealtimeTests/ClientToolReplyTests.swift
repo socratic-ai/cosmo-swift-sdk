@@ -13,9 +13,9 @@ import Testing
         return object
     }
 
-    @Test func maxBytesIsTheTransportCeiling() {
-        #expect(ClientToolReply.maxBytes == 15 * 1024)
-    }
+    // The ceiling's value is pinned against the shared contract vectors, in
+    // ``SDKClientToolConformanceTests`` — retyping it here would be a fourth
+    // place it can drift.
 
     @Test func successEnvelopeCarriesResultAndNullError() throws {
         let fields = try decode(ClientToolReply.envelope(ok: true, result: ["saved": .bool(true)]))

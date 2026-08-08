@@ -12,17 +12,16 @@ struct DialRequestTests {
 
     private func options(
         key: String = "cosmo_secret",
-        base: String = "https://api.example.com",
-        clientIdentity: ClientIdentity? = nil
+        base: String = "https://api.example.com"
     ) -> RealtimeSession.Options {
-        var options = RealtimeSession.Options(apiKey: key, clientIdentity: clientIdentity)
+        var options = RealtimeSession.Options(apiKey: key)
         options.baseURL = URL(string: base)!
         return options
     }
 
     @Test("POSTs to the session dial path with bearer auth + JSON content-type")
-    func requestShape() throws {
-        let req = try RealtimeSession._makeDialRequest(
+    func requestShape() async throws {
+        let req = try await RealtimeSession._makeDialRequest(
             options: options(),
             sessionId: "sess-1",
             phoneNumber: "+14155550199",
@@ -35,8 +34,8 @@ struct DialRequestTests {
     }
 
     @Test("body carries only phone_number when no caller-ID is passed")
-    func bodyWithoutCaller() throws {
-        let req = try RealtimeSession._makeDialRequest(
+    func bodyWithoutCaller() async throws {
+        let req = try await RealtimeSession._makeDialRequest(
             options: options(),
             sessionId: "sess-1",
             phoneNumber: "+14155550199",
@@ -48,8 +47,8 @@ struct DialRequestTests {
     }
 
     @Test("body carries caller_number when a caller-ID is passed")
-    func bodyWithCaller() throws {
-        let req = try RealtimeSession._makeDialRequest(
+    func bodyWithCaller() async throws {
+        let req = try await RealtimeSession._makeDialRequest(
             options: options(),
             sessionId: "sess-1",
             phoneNumber: "+14155550199",
@@ -74,33 +73,5 @@ struct DialRequestTests {
         }
         // A well-formed E.164 passes.
         try validateE164("+14155550199", field: "phone_number")
-    }
-
-    @Test("carries the client identity headers when one is set")
-    func dialSendsClientIdentity() throws {
-        let req = try RealtimeSession._makeDialRequest(
-            options: options(
-                clientIdentity: ClientIdentity(client: "cosmo-mac", marketingVersion: "1.0.0", build: "42")
-            ),
-            sessionId: "sess-1",
-            phoneNumber: "+14155550199",
-            callerNumber: nil
-        )
-        #expect(req.value(forHTTPHeaderField: "X-Cosmo-Client") == "cosmo-mac")
-        #expect(req.value(forHTTPHeaderField: "X-Cosmo-Client-Version") == "1.0.0")
-        #expect(req.value(forHTTPHeaderField: "X-Cosmo-Client-Build") == "42")
-    }
-
-    @Test("sends no client headers when no identity is set")
-    func dialWithoutClientIdentity() throws {
-        let req = try RealtimeSession._makeDialRequest(
-            options: options(),
-            sessionId: "sess-1",
-            phoneNumber: "+14155550199",
-            callerNumber: nil
-        )
-        #expect(req.value(forHTTPHeaderField: "X-Cosmo-Client") == nil)
-        #expect(req.value(forHTTPHeaderField: "X-Cosmo-Client-Version") == nil)
-        #expect(req.value(forHTTPHeaderField: "X-Cosmo-Client-Build") == nil)
     }
 }

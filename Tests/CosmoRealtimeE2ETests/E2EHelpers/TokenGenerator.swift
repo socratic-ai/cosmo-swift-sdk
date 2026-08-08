@@ -8,8 +8,8 @@ import Foundation
 /// internal test utilities.
 ///
 /// Dev defaults: key ``devkey``, secret
-/// ``devsecretdevsecretdevsecretdevse`` — must match the monorepo
-/// backend's ``scripts/docker-compose.livekit.yml``.
+/// ``devsecretdevsecretdevsecretdevse`` — must match the local
+/// LiveKit dev server's configured key/secret.
 struct TokenGenerator {
     let apiKey: String
     let apiSecret: String

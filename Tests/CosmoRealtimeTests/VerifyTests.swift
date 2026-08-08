@@ -42,15 +42,43 @@ struct VerifyTests {
         #expect(info.workspace == nil)
     }
 
-    @Test("a rejected credential maps to VerifyError.rejected with the parsed code/detail")
+    @Test("an auth-layer 401 maps to VerifyError.rejected carrying the detail, with no code")
     func rejectionMapsToRejected() async {
-        let body = #"{"detail":{"code":"auth_failed","message":"invalid key"}}"#
+        let body = #"{"detail":"Invalid API key"}"#
         let transport = StubTransport { jsonResponse(.unauthorized, body) }
         await #expect {
             _ = try await makeStubClient(transport).verify()
         } throws: { error in
             guard case .rejected(let code, let detail) = error as? VerifyError else { return false }
-            return code == "auth_failed" && detail.contains("invalid key")
+            return code == nil && detail == "Invalid API key"
+        }
+    }
+
+    @Test("a 401 without `detail` never reaches the rejection path")
+    func unauthorizedWithoutDetailIsTransport() async {
+        // `detail` is required on the 401 schema, so the generated client
+        // rejects a body without one before ``_unauthorized`` runs. That is
+        // what makes its no-detail fallback unreachable today. If this ever
+        // comes back ``.rejected``, the schema went optional and the fallback
+        // became live text a user can see.
+        let transport = StubTransport { jsonResponse(.unauthorized, "{}") }
+        await #expect {
+            _ = try await makeStubClient(transport).verify()
+        } throws: { error in
+            guard case .transport = error as? VerifyError else { return false }
+            return true
+        }
+    }
+
+    @Test("an undocumented rejection maps to VerifyError.rejected with the parsed code/detail")
+    func undocumentedRejectionMapsToRejected() async {
+        let body = #"{"detail":{"code":"workspace_forbidden","message":"no access"}}"#
+        let transport = StubTransport { jsonResponse(.forbidden, body) }
+        await #expect {
+            _ = try await makeStubClient(transport).verify()
+        } throws: { error in
+            guard case .rejected(let code, let detail) = error as? VerifyError else { return false }
+            return code == "workspace_forbidden" && detail.contains("no access")
         }
     }
 

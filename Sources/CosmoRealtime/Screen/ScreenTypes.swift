@@ -1,27 +1,47 @@
 import CoreGraphics
 import Foundation
+import OSLog
 
-/// Addresses one element inside one ``ScreenCapture``: what
-/// `cosmo_screen_locate` mints for each candidate it returns, and what the
-/// model hands straight back to a screen renderer. Opaque to the model — it
-/// passes a ref along, it never builds one.
-public struct ScreenRef: Sendable, Equatable {
-    public let captureID: String
-    public let elementIndex: Int
+/// The capture an element was found in and its index there, split back out of
+/// a `found_element` handle. Internal: a renderer's handler is given the
+/// resolved ``ScreenElement``, never the token's parts, so nothing downstream
+/// can address an element the locator did not pick.
+struct FoundElement: Sendable, Equatable {
+    let captureID: String
+    let elementIndex: Int
+}
 
-    public init(captureID: String, elementIndex: Int) {
-        self.captureID = captureID
-        self.elementIndex = elementIndex
+/// The `found_element` handle `cosmo_screen_locate` mints and a renderer
+/// spends. Opaque to the model — it passes one along, it never builds one.
+///
+/// The format is a two-party contract with the backend's
+/// `encode_found_element`, pinned by `contract/sdk-client-tool-vectors.json`
+/// (`foundElement`). It has to be pinned: an unresolvable handle is a benign
+/// decline by design, so a separator that disagreed with the backend would
+/// degrade into a session where every renderer quietly declines and the model
+/// re-locates forever, failing nothing.
+public enum FoundElementHandle {
+    static let separator: Character = "#"
+
+    /// Mint a handle the way the backend does. The SDK never calls this in
+    /// production — the locator is the only minter — but the format lives in
+    /// code so both sides can be checked against the same vectors.
+    static func encode(captureID: String, elementIndex: Int) -> String {
+        "\(captureID)\(separator)\(elementIndex)"
     }
 
-    /// Decode the wire form `{capture_id, element_idx}`. Returns `nil` for a
-    /// missing, partial, or non-conforming ref — model output is a boundary,
-    /// not an invariant.
-    static func decode(_ value: JSONValue?) -> ScreenRef? {
-        guard case let .object(fields)? = value else { return nil }
-        guard let captureID = fields["capture_id"]?.stringValue, !captureID.isEmpty else { return nil }
-        guard let index = fields["element_idx"]?.intValue, index >= 0 else { return nil }
-        return ScreenRef(captureID: captureID, elementIndex: index)
+    /// Split a handle into its parts; `nil` when it is not one this SDK minted
+    /// the shape of. The rightmost separator binds, so a capture id containing
+    /// one survives the round trip.
+    static func decode(_ handle: String) -> FoundElement? {
+        guard let cut = handle.lastIndex(of: separator) else { return nil }
+        let captureID = String(handle[handle.startIndex..<cut])
+        let index = handle[handle.index(after: cut)...]
+        guard !captureID.isEmpty, !index.isEmpty,
+              index.allSatisfy(\.isASCII), index.allSatisfy(\.isNumber),
+              let elementIndex = Int(index)
+        else { return nil }
+        return FoundElement(captureID: captureID, elementIndex: elementIndex)
     }
 }
 
@@ -49,8 +69,8 @@ public enum ScreenPlacement: String, Sendable, CaseIterable {
     case auto, top, bottom, left, right
 }
 
-/// Which affordance to draw on a spotlight, matched to the action being asked
-/// of the user. Describes the glyph only — a spotlight never acts (see
+/// Which affordance to draw on a highlight, matched to the action being asked
+/// of the user. Describes the glyph only — a highlight never acts (see
 /// ``ScreenAction`` for that).
 public enum ScreenAffordance: String, Sendable, CaseIterable {
     case pointer
@@ -70,9 +90,9 @@ public enum ScreenAffordance: String, Sendable, CaseIterable {
 ///
 /// Deliberately not a ``CGRect``: ``ScreenElement/frame`` is also a rectangle
 /// but in screen points, and the two spaces are not interchangeable. A distinct
-/// type makes mixing them a compile error rather than a spotlight drawn in the
+/// type makes mixing them a compile error rather than a highlight drawn in the
 /// top-left one percent of the screen.
-public struct ScreenRegion: Sendable, Equatable {
+public struct ScreenBox: Sendable, Equatable {
     public let x: Double
     public let y: Double
     public let width: Double
@@ -89,10 +109,10 @@ public struct ScreenRegion: Sendable, Equatable {
 /// What the caller believes the target is *called*, alongside where it thinks
 /// it is. A host with a platform accessibility tree can ask the OS for that
 /// control's exact frame — a far better answer than any estimate — and one
-/// without a usable tree ignores this and falls back to the region.
+/// without a usable tree ignores this and falls back to the box.
 ///
 /// ``title`` is the control's own visible text ("Files changed"), not the
-/// tooltip the spotlight displays; those are different strings and the tooltip
+/// tooltip the highlight displays; those are different strings and the tooltip
 /// travels separately as `label`.
 public struct ScreenElementHint: Sendable, Equatable {
     public let title: String
@@ -139,7 +159,7 @@ public struct ScreenElement: Sendable {
 /// it; the platform host defines what "still fresh" means.
 public struct ScreenCaptureContext: Sendable {
     /// Frontmost app PID at capture time — a host may re-check it before
-    /// acting so a stale ref can't land in a window the user switched to.
+    /// acting so a stale handle can't land in a window the user switched to.
     public let appPID: pid_t?
     /// Focused-window frame (top-left global points); nil when unavailable.
     public let windowFrame: CGRect?
@@ -164,6 +184,19 @@ public struct ScreenCapture: Sendable {
     }
 }
 
+/// What the server wants out of this capture. The accessibility walk is the
+/// expensive half and only the grounding locator reads it, so a handler that
+/// can skip it when `wantsElements` is false answers materially faster.
+/// Ignoring the flag is always correct — the extra elements are dropped.
+public struct ScreenCaptureRequest: Sendable, Equatable {
+    /// Whether the caller will use ``ScreenCapture/elements``.
+    public let wantsElements: Bool
+
+    public init(wantsElements: Bool) {
+        self.wantsElements = wantsElements
+    }
+}
+
 /// Thrown by a ``SessionConfig/Tool/screenLocate(capture:)`` handler when the
 /// screen can't be captured for a benign reason (call ended, sharing off). The
 /// SDK maps it to `captured:false` + the message; any other error surfaces as a
@@ -177,7 +210,7 @@ public struct ScreenCaptureUnavailable: Error, Sendable {
 
 /// An unexpected failure servicing a screen tool (missing/invalid args,
 /// byte-stream publish failure). Surfaces as an `{ok:false,error}` envelope via
-/// ``ClientToolDispatch``; a ref that no longer resolves is a benign decline
+/// ``ClientToolDispatch``; a handle that no longer resolves is a benign decline
 /// (`clicked:false` / `shown:false`) rather than one of these.
 struct ScreenToolError: Error, LocalizedError {
     let message: String
@@ -188,15 +221,17 @@ struct ScreenToolError: Error, LocalizedError {
 
 /// Short-TTL cache pairing a capture with the renderer call that follows it:
 /// `cosmo_screen_locate` drives the capture RPC, grounds the model's
-/// description against the streamed screenshot + AX list, and mints refs; a
+/// description against the streamed screenshot + AX list, and mints handles; a
 /// renderer resolves one here against the *same* snapshot. Keyed by capture id
 /// (capped at ``maxEntries``) so concurrent captures don't evict each other.
 public final class ScreenCaptureCache: @unchecked Sendable {
-    /// Every screen tool a host wires shares this one, which is what lets a ref
-    /// minted during ``SessionConfig/Tool/screenLocate(capture:)`` resolve
+    /// Every screen tool a host wires shares this one, which is what lets a
+    /// handle minted during ``SessionConfig/Tool/screenLocate(capture:)`` resolve
     /// inside a renderer declared separately. Capture ids are server-minted per
     /// capture, so entries never collide; ``maxAge`` and ``maxEntries`` bound it.
     public static let shared = ScreenCaptureCache()
+
+    static let log = Logger(subsystem: CosmoRealtimeLog.subsystem, category: "screen")
 
     /// A click against an older capture is grounded on a screen the user has
     /// likely scrolled or navigated away from.
@@ -238,13 +273,28 @@ public final class ScreenCaptureCache: @unchecked Sendable {
         return entry.capture
     }
 
-    /// The element a ref addresses, with the capture it was found in. `nil` for
-    /// any unresolvable ref — unknown capture id, expired entry, or an index
-    /// past the elements that capture carried.
-    func resolve(_ ref: ScreenRef, now: Date? = nil) -> (element: ScreenElement, capture: ScreenCapture)? {
-        guard let capture = get(ref.captureID, now: now) else { return nil }
-        guard capture.elements.indices.contains(ref.elementIndex) else { return nil }
-        return (capture.elements[ref.elementIndex], capture)
+    /// The element a handle names, with the capture it was found in. `nil` for
+    /// any unresolvable handle — a token that does not parse, an unknown capture
+    /// id, an expired entry, or an index past the elements that capture carried.
+    ///
+    /// A token that does not parse is the same miss to the model but not the
+    /// same event: the locator only ever mints well-formed handles, so it means
+    /// either this SDK drifted from the backend's encoder or the model invented
+    /// one. Neither can throw — a fabricated handle is model output, not a
+    /// broken invariant — so it is logged instead.
+    func resolve(
+        _ foundElement: String,
+        now: Date? = nil
+    ) -> (element: ScreenElement, capture: ScreenCapture)? {
+        guard let parts = FoundElementHandle.decode(foundElement) else {
+            Self.log.warning(
+                "unparseable found_element handle: \(foundElement, privacy: .public)"
+            )
+            return nil
+        }
+        guard let capture = get(parts.captureID, now: now) else { return nil }
+        guard capture.elements.indices.contains(parts.elementIndex) else { return nil }
+        return (capture.elements[parts.elementIndex], capture)
     }
 
     public func clear() {
@@ -283,16 +333,16 @@ extension JSONValue {
     }
 }
 
-/// Model-facing: a ref the cache can no longer resolve is a benign decline,
+/// Model-facing: a handle the cache can no longer resolve is a benign decline,
 /// not an error — the model's move is to locate again, not to retry.
-let unresolvableRefReason =
-    "that ref is no longer valid — call cosmo_screen_locate again for a fresh one"
+let unresolvableHandleReason =
+    "that found_element is no longer valid — call cosmo_screen_locate again for a fresh one"
 
 // MARK: - Shared arg decoding
 
 enum ScreenArgs {
     /// Unknown placement/affordance values fall back rather than reject: they
-    /// mean the caller is newer than this SDK, and a spotlight with the wrong
+    /// mean the caller is newer than this SDK, and a highlight with the wrong
     /// glyph still points the user at the right control, whereas a rejection
     /// points them at nothing.
     static func placement(_ args: [String: JSONValue]) -> ScreenPlacement {

@@ -15,11 +15,6 @@ public typealias EndCall = CosmoRealtimeAPI.Components.Schemas.RealtimeEndCall
 ///
 /// Every field is optional: the server applies neutral defaults for
 /// anything left unset, and unset fields stay off the wire entirely.
-/// Client-level defaults can be supplied once via
-/// ``RealtimeSession/Options/defaultConfig`` — per-call values win over
-/// them field by field. A catalog-agent launch (``agentName``) never
-/// inherits persona defaults: the stored config governs, and only per-run
-/// ride-alongs resolve against defaults.
 public struct SessionConfig: Sendable, Equatable {
     /// Machine handle of a workspace catalog agent to run (lowercase
     /// ``[a-z0-9-]``, e.g. ``"driver-pay"``). The stored agent config runs
@@ -192,7 +187,8 @@ public struct SessionConfig: Sendable, Equatable {
         /// (on).
         public var output: Bool?
         /// Enable upstream noise cancellation on the input audio. ``nil``
-        /// keeps the server default (on).
+        /// keeps the server default (off). Set ``true`` when the microphone
+        /// will hear more than one voice.
         public var noiseCancellation: Bool?
         /// Background-ambience bed on the assistant's output; present =
         /// enabled.
@@ -227,28 +223,50 @@ public struct SessionConfig: Sendable, Equatable {
         CosmoRealtimeAPI.Components.Schemas.InterruptionSensitivity
     public typealias ThinkingLevel =
         CosmoRealtimeAPI.Components.Schemas.RealtimeThinkingLevel
+    public typealias EndOfSpeechSensitivity =
+        CosmoRealtimeAPI.Components.Schemas.RealtimeEndOfSpeechSensitivity
+    public typealias SemanticEagerness =
+        CosmoRealtimeAPI.Components.Schemas.RealtimeSemanticEagerness
+
+    /// Which OpenAI-Realtime turn detector runs, and the knobs it reads. Each
+    /// detector carries only its own, so pairing ``eagerness`` with the fixed
+    /// silence window is unrepresentable.
+    public enum OpenAITurnDetection: Sendable, Equatable {
+        /// Ends the turn after a fixed window of silence.
+        case serverVad(
+            silenceDurationMs: Int? = nil,
+            prefixPaddingMs: Int? = nil
+        )
+        /// Ends the turn as soon as the utterance reads as complete.
+        /// ``eagerness`` paces it — ``high`` answers sooner, ``low`` waits
+        /// longer for the user to continue.
+        case semanticVad(eagerness: SemanticEagerness? = nil)
+    }
 
     /// Provider-scoped model knobs, discriminated on the provider. A knob is
     /// honored only by its provider — ``thinkingLevel`` lives only on
     /// ``gemini`` — so an illegal pairing is unrepresentable. ``model`` on
     /// ``SessionConfig`` selects the concrete model within the chosen provider.
     public enum ModelOptions: Sendable, Equatable {
-        /// Gemini-realtime knobs.
+        /// Gemini-realtime knobs. ``endOfSpeechSensitivity``,
+        /// ``silenceDurationMs`` and ``prefixPaddingMs`` bind endpointing —
+        /// how long the model waits before deciding the user's turn is over.
         case gemini(
             temperature: Double? = nil,
             maxOutputTokens: Int? = nil,
-            thinkingLevel: ThinkingLevel? = nil
+            thinkingLevel: ThinkingLevel? = nil,
+            includeThoughts: Bool? = nil,
+            endOfSpeechSensitivity: EndOfSpeechSensitivity? = nil,
+            silenceDurationMs: Int? = nil,
+            prefixPaddingMs: Int? = nil
         )
-        /// OpenAI Realtime — pins its own sampling and token limits; nothing
-        /// tunable today.
-        case openai
-        /// Ultravox knobs.
-        case ultravox(
-            temperature: Double? = nil,
-            turnEndpointDelaySeconds: Double? = nil
-        )
-        /// PersonaPlex (Cosmo Voice Light) — nothing tunable today.
-        case personaplex
+        /// OpenAI Realtime — pins its own sampling and token limits, so
+        /// ``turnDetection`` is the only thing to tune. ``nil`` keeps the
+        /// server's default detector.
+        case openai(turnDetection: OpenAITurnDetection? = nil)
+        /// OpenAI Realtime mini tier — the same API on a faster, cheaper
+        /// model, and equally untunable today.
+        case openaiMini
 
         /// The provider-scoped wire block: only the selected provider's knobs
         /// cross the wire, with the discriminator set explicitly.
@@ -256,25 +274,48 @@ public struct SessionConfig: Sendable, Equatable {
             .ModelOptionsPayload
         {
             switch self {
-            case let .gemini(temperature, maxOutputTokens, thinkingLevel):
+            case let .gemini(
+                temperature,
+                maxOutputTokens,
+                thinkingLevel,
+                includeThoughts,
+                endOfSpeechSensitivity,
+                silenceDurationMs,
+                prefixPaddingMs
+            ):
                 return .gemini(
                     .init(
+                        endOfSpeechSensitivity: endOfSpeechSensitivity,
+                        includeThoughts: includeThoughts,
                         maxOutputTokens: maxOutputTokens,
+                        prefixPaddingMs: prefixPaddingMs,
                         provider: .gemini,
+                        silenceDurationMs: silenceDurationMs,
                         temperature: temperature,
                         thinkingLevel: thinkingLevel
                     ))
-            case .openai:
-                return .openai(.init(provider: .openai))
-            case let .ultravox(temperature, turnEndpointDelaySeconds):
-                return .cosmoVoiceUltravox(
-                    .init(
-                        provider: .cosmoVoiceUltravox,
-                        temperature: temperature,
-                        turnEndpointDelaySeconds: turnEndpointDelaySeconds
-                    ))
-            case .personaplex:
-                return .cosmoVoicePersonaplex(.init(provider: .cosmoVoicePersonaplex))
+            case .openaiMini:
+                return .openaiMini(.init(provider: .openaiMini))
+            case let .openai(turnDetection):
+                switch turnDetection {
+                case nil:
+                    return .openai(.init(provider: .openai))
+                case let .serverVad(silenceDurationMs, prefixPaddingMs):
+                    return .openai(
+                        .init(
+                            prefixPaddingMs: prefixPaddingMs,
+                            provider: .openai,
+                            silenceDurationMs: silenceDurationMs,
+                            turnDetection: .serverVad
+                        ))
+                case let .semanticVad(eagerness):
+                    return .openai(
+                        .init(
+                            eagerness: eagerness,
+                            provider: .openai,
+                            turnDetection: .semanticVad
+                        ))
+                }
             }
         }
     }
@@ -311,7 +352,7 @@ public struct SessionConfig: Sendable, Equatable {
         )
         /// Opt-in to the server-executed web-search tool. Zero-config —
         /// the server owns the model-facing declaration. Resolved-flow
-        /// vocabulary; the legacy endpoint ignores it.
+        /// vocabulary.
         case webSearch
         /// Opt-in to the server-executed frame-examination tool (reads the
         /// freshest camera/screen frame at full resolution). Zero-config;

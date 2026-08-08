@@ -8,7 +8,7 @@ import Testing
 /// queued VPIO transition has actually been applied, not merely queued.
 ///
 /// The coordinator is process-global and other suites drive it concurrently
-/// (every `VoiceSessionModel` teardown queues a release), so these tests only
+/// (a host's session teardown queues a release), so these tests only
 /// assert on their own transitions — never on the exact applied sequence.
 @Suite("MicPrewarmCoordinator", .serialized)
 @MainActor

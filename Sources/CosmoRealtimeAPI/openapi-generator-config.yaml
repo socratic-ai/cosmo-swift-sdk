@@ -2,6 +2,6 @@ generate:
   - types
   - client
 accessModifier: public
-# Same naming strategy as the legacy ``CosmoRealtime`` target — see the
-# rationale in ``Sources/CosmoRealtime/openapi-generator-config.yaml``.
+# Idiomatic naming so generated Swift symbols read as Swift, not as
+# verbatim wire identifiers.
 namingStrategy: idiomatic

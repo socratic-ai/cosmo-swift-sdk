@@ -1,7 +1,4 @@
 import Foundation
-import os
-
-private let agentLog = Logger(subsystem: CosmoRealtimeLog.subsystem, category: "agent")
 
 /// Augments a session's tools with skills and MCP servers, augments its
 /// instructions with the resident skill menu, and owns the MCP lifecycle.
@@ -45,22 +42,14 @@ public struct Agent: Sendable {
     ) async throws -> AgentSession {
         var cfg = config
 
-        // Menu and tool attach atomically — a menu advertising a tool that
-        // isn't registered would misdirect the model, so a name collision
-        // (an inherited or agent tool already claiming load_skill) drops both.
         var skillTools: [SessionConfig.Tool] = []
         if let wiring = buildLoadSkillTool(skills) {
-            let claimed = ((cfg.tools ?? []) + tools).contains { $0.name == loadSkillToolName }
-            if claimed {
-                agentLog.warning("a configured tool already claims the load_skill name; the skills menu and tool are not attached")
-            } else {
-                skillTools = [wiring.tool]
-                if !wiring.menu.isEmpty {
-                    if let existing = cfg.instructions, !existing.isEmpty {
-                        cfg.instructions = "\(existing)\n\n\(wiring.menu)"
-                    } else {
-                        cfg.instructions = wiring.menu
-                    }
+            skillTools = [wiring.tool]
+            if !wiring.menu.isEmpty {
+                if let existing = cfg.instructions, !existing.isEmpty {
+                    cfg.instructions = "\(existing)\n\n\(wiring.menu)"
+                } else {
+                    cfg.instructions = wiring.menu
                 }
             }
         }
@@ -69,7 +58,7 @@ public struct Agent: Sendable {
         // plus our own additions reserve the namespace: a colliding MCP tool is
         // dropped, and a duplicate-named addition never shadows an earlier
         // handler or reaches the wire twice. First occurrence wins, in order:
-        // inherited → agent tools → load_skill → MCP.
+        // inherited → agent tools → cosmo_sdk_load_skill → MCP.
         let inherited = cfg.tools ?? []
         let reserved = Set((inherited + tools + skillTools).map(\.name))
         let connected = try await mcp?.connect(reservedNames: reserved, transportFactory: transportFactory)

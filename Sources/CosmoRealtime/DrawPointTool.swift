@@ -44,7 +44,7 @@ public enum DrawPointTool {
         """#
     }
 
-    /// The declaration advertised at connect (`VoiceSession.start(declaredTools:)`).
+    /// The declaration advertised at connect.
     public static func declaredTool() -> DeclaredClientTool {
         DeclaredClientTool(
             name: name,

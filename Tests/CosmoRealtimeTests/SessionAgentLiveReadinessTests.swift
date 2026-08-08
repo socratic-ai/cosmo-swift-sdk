@@ -8,7 +8,7 @@ import Testing
 /// broadcast the SFU never replays to a client whose data channel came up after
 /// it was sent; without this fallback, a prepared-room agent that publishes
 /// `ready` before the client is listening strands an otherwise-live session at
-/// the 20s readiness watchdog. See VoiceSession.markAgentReady.
+/// the 20s readiness watchdog. See the wrapper's agent-ready latch.
 @Suite("RealtimeSession agent-track readiness")
 struct SessionAgentLiveReadinessTests {
 

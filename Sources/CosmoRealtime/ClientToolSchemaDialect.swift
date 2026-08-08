@@ -16,14 +16,13 @@ public struct ToolSchemaError: Error, Sendable, Equatable, LocalizedError {
     public var errorDescription: String? { "\(code): \(message)" }
 }
 
-/// Mirrors the backend's restricted JSON-schema dialect for client-declared tools
-/// (the monorepo backend's `app/realtime/tools/client_declared.py`: `_SCHEMA_ALLOWED_KEYS` /
-/// `_schema_violation`). A declaration whose `parametersJSON` carries a key
-/// outside this set is rejected at the backend and **dropped** — the model never
-/// sees the tool. The interpretation (depth counted from 1 at the top-level
-/// node, a global property cap) is pinned against the shared vectors in
-/// `sdks/cosmo-realtime/contract/client-tool-schema-vectors.json`; a mismatch
-/// here means the backend has changed and this mirror must be updated.
+/// Mirrors the backend's restricted JSON-schema dialect for client-declared
+/// tools. A declaration whose `parametersJSON` carries a key outside this set
+/// is rejected at the backend and **dropped** — the model never sees the
+/// tool. The interpretation (depth counted from 1 at the top-level node, a
+/// global property cap) is pinned against the shared cross-SDK schema
+/// vectors; a mismatch here means the backend has changed and this mirror
+/// must be updated.
 enum ClientToolSchemaDialect {
     static let allowedKeys: Set<String> = [
         "type", "properties", "required", "items", "enum",
