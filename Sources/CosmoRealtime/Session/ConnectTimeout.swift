@@ -2,7 +2,7 @@ import Foundation
 import os
 
 /// Run `operation` with a hard `seconds` deadline, throwing
-/// ``CosmoRealtimeError/connectTimeout`` if it doesn't settle in time.
+/// ``RealtimeError/connectTimeout`` if it doesn't settle in time.
 ///
 /// Unstructured tasks + a one-shot ``CheckedContinuation`` (guarded by an
 /// ``OSAllocatedUnfairLock``) rather than a task group, so a non-cancellable
@@ -55,7 +55,7 @@ func _withConnectTimeout(
             }
             if !alreadyResumed {
                 opTask.cancel()
-                cont.resume(throwing: CosmoRealtimeError.connectTimeout)
+                cont.resume(throwing: RealtimeError.connectTimeout)
             }
         }
     }

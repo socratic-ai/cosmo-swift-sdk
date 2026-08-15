@@ -8,7 +8,7 @@ import Foundation
 /// ``RealtimeSession/connectTimings`` from it instead of handing out the join
 /// credentials the transport already spent.
 typealias RealtimeSessionResponse =
-    CosmoRealtimeAPI.Components.Schemas.RealtimeSessionResponse
+    CosmoRealtimeAPI.Components.Schemas.SessionResponse
 
 /// Result of a successful transport-level session start.
 struct SessionStartInfo: Sendable {

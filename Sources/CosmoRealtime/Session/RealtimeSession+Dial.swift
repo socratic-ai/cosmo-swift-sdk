@@ -119,6 +119,7 @@ extension RealtimeSession {
         request.httpMethod = "POST"
         request.setValue("Bearer \(try await options.bearerToken())", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(RealtimeSession.sdkIdentityHeaderValue, forHTTPHeaderField: "X-Cosmo-SDK")
         request.httpBody = try JSONEncoder().encode(
             DialRequestBody(phoneNumber: phoneNumber, callerNumber: callerNumber)
         )

@@ -28,7 +28,7 @@ public final class TokenSource: Sendable {
 
     /// Re-fetch this long before ``MintedToken/expiresAt`` so an in-flight
     /// session start never races the expiry boundary. Matches the cross-SDK
-    /// contract (``contract/token-source-vectors.json``).
+    /// contract (``token-source-vectors.json``).
     static let refreshSkew: TimeInterval = 60
 
     /// The error slug for failures detected on this side of the wire —

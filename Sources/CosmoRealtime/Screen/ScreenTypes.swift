@@ -15,7 +15,7 @@ struct FoundElement: Sendable, Equatable {
 /// spends. Opaque to the model — it passes one along, it never builds one.
 ///
 /// The format is a two-party contract with the backend's
-/// `encode_found_element`, pinned by `contract/sdk-client-tool-vectors.json`
+/// `encode_found_element`, pinned by `sdk-client-tool-vectors.json`
 /// (`foundElement`). It has to be pinned: an unresolvable handle is a benign
 /// decline by design, so a separator that disagreed with the backend would
 /// degrade into a session where every renderer quietly declines and the model

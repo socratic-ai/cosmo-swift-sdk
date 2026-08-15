@@ -2,11 +2,14 @@ import Foundation
 import HTTPTypes
 import OpenAPIRuntime
 
-/// Injects ``Authorization: Bearer <token>`` on every outbound request.
-/// The bearer value is a workspace api key, a minted per-user JWT, or a
-/// source-fetched JWT — indistinguishable on the wire. Resolved per request
-/// so a ``TokenSource`` credential can refresh between calls.
+/// Injects ``Authorization: Bearer <token>`` and the SDK identity header on
+/// every outbound request. The bearer value is a workspace api key, a minted
+/// per-user JWT, or a source-fetched JWT — indistinguishable on the wire.
+/// Resolved per request so a ``TokenSource`` credential can refresh between
+/// calls.
 struct BearerAuthMiddleware: ClientMiddleware {
+    static let sdkHeaderField = HTTPField.Name("x-cosmo-sdk")!
+
     let credential: RealtimeSession.Options.Credential
 
     func intercept(
@@ -18,6 +21,7 @@ struct BearerAuthMiddleware: ClientMiddleware {
     ) async throws -> (HTTPResponse, HTTPBody?) {
         var req = request
         req.headerFields[.authorization] = "Bearer \(try await credential.bearerToken())"
+        req.headerFields[Self.sdkHeaderField] = RealtimeSession.sdkIdentityHeaderValue
         return try await next(req, body, baseURL)
     }
 }

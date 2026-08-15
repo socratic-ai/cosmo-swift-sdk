@@ -2,7 +2,7 @@ import Foundation
 
 /// Augments a session's tools with skills and MCP servers, augments its
 /// instructions with the resident skill menu, and owns the MCP lifecycle.
-public struct Agent: Sendable {
+public struct RealtimeAgent: Sendable {
     public var tools: [SessionConfig.Tool]
     public var skills: [Skill]
     public var mcp: McpRegistry?
@@ -22,11 +22,13 @@ public struct Agent: Sendable {
         self.hooks = hooks
     }
 
+    /// Open one session from this agent. The session owns any MCP
+    /// connections from here on: ending it tears them down too.
     public func start(
         _ options: RealtimeSession.Options,
         config: SessionConfig = SessionConfig(),
         micMuted: Bool = false
-    ) async throws -> AgentSession {
+    ) async throws -> RealtimeSession {
         try await start(
             config: config,
             transportFactory: defaultMCPTransportFactory
@@ -39,7 +41,7 @@ public struct Agent: Sendable {
         config: SessionConfig,
         transportFactory: MCPTransportFactory,
         makeSession: @Sendable (SessionConfig) async throws -> RealtimeSession
-    ) async throws -> AgentSession {
+    ) async throws -> RealtimeSession {
         var cfg = config
 
         var skillTools: [SessionConfig.Tool] = []
@@ -72,34 +74,13 @@ public struct Agent: Sendable {
             }
             if let hooks { cfg.hooks = (cfg.hooks ?? []) + hooks }
             let session = try await makeSession(cfg)
-            return AgentSession(session: session, connected: connected)
+            if let connected {
+                await session._attachOnClose { await connected.aclose() }
+            }
+            return session
         } catch {
             if let connected { await connected.aclose() }
             throw error
         }
-    }
-}
-
-/// A running agent session: the live `RealtimeSession` plus its MCP
-/// connections. Drive the session via `session`; `end()` ends it then tears
-/// down MCP.
-public struct AgentSession: Sendable {
-    public let session: RealtimeSession
-    private let connected: ConnectedMcp?
-
-    init(session: RealtimeSession, connected: ConnectedMcp?) {
-        self.session = session
-        self.connected = connected
-    }
-
-    public func end() async {
-        await session.end()
-        if let connected { await connected.aclose() }
-    }
-
-    /// Suspend until the underlying session has ended, for any reason. See
-    /// ``RealtimeSession/waitUntilEnded()``.
-    public func waitUntilEnded() async {
-        await session.waitUntilEnded()
     }
 }

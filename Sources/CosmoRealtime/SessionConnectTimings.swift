@@ -6,7 +6,7 @@ import Foundation
 /// the startup-waterfall event so each millisecond of connect latency is
 /// attributable to client, network, or server.
 public typealias RealtimeSessionStartTimings =
-    CosmoRealtimeAPI.Components.Schemas.RealtimeSessionStartTimings
+    CosmoRealtimeAPI.Components.Schemas.SessionStartTimings
 
 /// Per-session connect-latency snapshot: the client-measured phases of the
 /// connect plus the server's own breakdown of session start. Sink-agnostic —

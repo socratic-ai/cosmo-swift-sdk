@@ -22,7 +22,7 @@ struct AgentSkillsTests {
         "## Skills\nCall cosmo_sdk_load_skill(name) to load private instructions when the conversation reaches the matching path:\n- refunds: handle refunds"
 
     @Test func injectsLoadSkillToolAndAppendsMenuToInstructions() async throws {
-        let agent = try Agent(skills: [hotSkill("refunds", "handle refunds")])
+        let agent = try RealtimeAgent(skills: [hotSkill("refunds", "handle refunds")])
         var names: [String] = []
         var instructions: String?
         let s = try await agent.start(
@@ -39,7 +39,7 @@ struct AgentSkillsTests {
     }
 
     @Test func menuBecomesInstructionsWhenNoneSet() async throws {
-        let agent = try Agent(skills: [hotSkill("refunds", "handle refunds")])
+        let agent = try RealtimeAgent(skills: [hotSkill("refunds", "handle refunds")])
         var instructions: String?
         let s = try await agent.start(config: SessionConfig(), transportFactory: { _ in FakeMCPTransport() }) { cfg in
             instructions = cfg.instructions
@@ -52,7 +52,7 @@ struct AgentSkillsTests {
     @Test func emptyInstructionsBecomesMenuAlone() async throws {
         // Empty (not nil) instructions must not produce leading blank lines —
         // mirrors Python treating "" as falsy.
-        let agent = try Agent(skills: [hotSkill("refunds", "handle refunds")])
+        let agent = try RealtimeAgent(skills: [hotSkill("refunds", "handle refunds")])
         var instructions: String?
         let s = try await agent.start(config: SessionConfig(instructions: ""), transportFactory: { _ in FakeMCPTransport() }) { cfg in
             instructions = cfg.instructions
@@ -68,7 +68,7 @@ struct AgentSkillsTests {
         let defaultTool = SessionConfig.Tool.client(
             name: "web_search", description: "d", parameters: ["type": .string("object")], handler: { _ in [:] }
         )
-        let agent = try Agent(skills: [hotSkill("refunds", "handle refunds")])
+        let agent = try RealtimeAgent(skills: [hotSkill("refunds", "handle refunds")])
         var names: [String] = []
         var instructions: String?
         let s = try await agent.start(
@@ -85,7 +85,7 @@ struct AgentSkillsTests {
     }
 
     @Test func noSkillsAddsNoToolAndLeavesConfigUntouched() async throws {
-        let agent = try Agent(skills: [])
+        let agent = try RealtimeAgent(skills: [])
         var tools: [SessionConfig.Tool]?
         var instructions: String?
         let s = try await agent.start(
@@ -102,7 +102,7 @@ struct AgentSkillsTests {
     }
 
     @Test func loadSkillHandlerReturnsBodyInPrivateEnvelope() async throws {
-        let agent = try Agent(skills: [hotSkill("refunds")])
+        let agent = try RealtimeAgent(skills: [hotSkill("refunds")])
         var handler: ClientToolHandler?
         let s = try await agent.start(config: SessionConfig(), transportFactory: { _ in FakeMCPTransport() }) { cfg in
             if case let .sdkClient(tool)? = (cfg.tools ?? []).first { handler = tool.handler }
@@ -117,7 +117,7 @@ struct AgentSkillsTests {
         let caller = SessionConfig.Tool.client(
             name: "caller", description: "d", parameters: ["type": .string("object")], handler: { _ in [:] }
         )
-        let agent = try Agent(
+        let agent = try RealtimeAgent(
             tools: [caller],
             skills: [hotSkill("refunds")],
             mcp: McpRegistry(servers: [McpStdioServer(name: "fs", command: "x")])
@@ -126,12 +126,12 @@ struct AgentSkillsTests {
             FakeMCPTransport(responses: ["tools/list": #"{"tools":[{"name":"read","inputSchema":{"type":"object"}}]}"#])
         }
         var names: [String] = []
-        let agentSession = try await agent.start(config: SessionConfig(), transportFactory: mcpFactory) { cfg in
+        let session = try await agent.start(config: SessionConfig(), transportFactory: mcpFactory) { cfg in
             names = self.toolNames(cfg)
             return try await self.fakeRealtime(cfg)
         }
         #expect(names == ["caller", "cosmo_sdk_load_skill", "mcp__fs__read"])
-        await agentSession.end()
+        await session.end()
     }
 
     @Test func reservedNamesDropCollidingMcpTool() async throws {
@@ -140,7 +140,7 @@ struct AgentSkillsTests {
         let caller = SessionConfig.Tool.client(
             name: "mcp__fs__read", description: "d", parameters: ["type": .string("object")], handler: { _ in [:] }
         )
-        let agent = try Agent(
+        let agent = try RealtimeAgent(
             tools: [caller],
             skills: [hotSkill("refunds")],
             mcp: McpRegistry(servers: [McpStdioServer(name: "fs", command: "x")])
@@ -158,12 +158,12 @@ struct AgentSkillsTests {
     }
 
     @Test func configToolReservesNameAgainstMcp() async throws {
-        // A tool on the config — not just Agent.tools — must reserve its name
+        // A tool on the config — not just RealtimeAgent.tools — must reserve its name
         // so a colliding MCP tool is dropped.
         let defaultTool = SessionConfig.Tool.client(
             name: "mcp__fs__read", description: "d", parameters: ["type": .string("object")], handler: { _ in [:] }
         )
-        let agent = try Agent(mcp: McpRegistry(servers: [McpStdioServer(name: "fs", command: "x")]))
+        let agent = try RealtimeAgent(mcp: McpRegistry(servers: [McpStdioServer(name: "fs", command: "x")]))
         let mcpFactory: MCPTransportFactory = { _ in
             FakeMCPTransport(responses: ["tools/list": #"{"tools":[{"name":"read","inputSchema":{"type":"object"}}]}"#])
         }
@@ -186,7 +186,7 @@ struct AgentSkillsTests {
         let caller = SessionConfig.Tool.client(
             name: loadSkillToolName, description: "caller's own", parameters: ["type": .string("object")], handler: { _ in [:] }
         )
-        let agent = try Agent(tools: [caller], skills: [hotSkill("refunds")])
+        let agent = try RealtimeAgent(tools: [caller], skills: [hotSkill("refunds")])
         await #expect {
             _ = try await agent.start(config: SessionConfig(), transportFactory: { _ in FakeMCPTransport() }) { cfg in
                 try await self.fakeRealtime(cfg)
@@ -204,7 +204,7 @@ struct AgentSkillsTests {
         let caller = SessionConfig.Tool.client(
             name: "load_skill", description: "caller's own", parameters: ["type": .string("object")], handler: { _ in [:] }
         )
-        let agent = try Agent(tools: [caller], skills: [hotSkill("refunds", "handle refunds")])
+        let agent = try RealtimeAgent(tools: [caller], skills: [hotSkill("refunds", "handle refunds")])
         var names: [String] = []
         var instructions: String?
         let s = try await agent.start(

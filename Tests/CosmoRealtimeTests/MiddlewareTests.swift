@@ -44,6 +44,10 @@ struct MiddlewareTests {
         }
 
         #expect(captured?.headerFields[.authorization] == "Bearer abc123")
+        #expect(
+            captured?.headerFields[BearerAuthMiddleware.sdkHeaderField]
+                == "\(RealtimeSession.sdkName)/\(RealtimeSession.sdkVersion)"
+        )
     }
 
     @Test("BearerAuthMiddleware overwrites an existing Authorization header")

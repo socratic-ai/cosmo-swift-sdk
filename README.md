@@ -3,11 +3,21 @@
 Native async/await Swift client for the Cosmo Realtime API.
 
 > **Beta.** CosmoAI is pre-1.0: minor releases (`0.x` → `0.y`) may include
-> breaking API changes, so pin with `.upToNextMinor`. Cosmo cuts 1.0 once the
-> wire protocol and the public session API have stabilized.
+> breaking API changes — check the
+> [changelog](https://platform.askcosmo.ai/docs/meta/changelog) when you
+> update. Cosmo cuts 1.0 once the wire protocol and the public session API
+> have stabilized.
 
 > New to the SDK? Start with the [documentation](https://platform.askcosmo.ai/docs)
 > — getting started, the credential model, and the expected session lifecycle.
+
+Source of truth and issue tracker:
+[socratic-ai/cosmo-ai](https://github.com/socratic-ai/cosmo-ai) (the `swift/`
+directory). The
+[cosmo-swift-sdk](https://github.com/socratic-ai/cosmo-swift-sdk) repository is
+the Swift Package Manager distribution of the same code — re-rooted and tagged,
+because SwiftPM consumes a repository whose root is the package. Install from
+it; file issues on cosmo-ai.
 
 ## Requirements
 
@@ -18,10 +28,7 @@ Native async/await Swift client for the Cosmo Realtime API.
 
 ```swift
 dependencies: [
-    .package(
-        url: "https://github.com/socratic-ai/cosmo-swift-sdk",
-        .upToNextMinor(from: "0.4.0")
-    ),
+    .package(url: "https://github.com/socratic-ai/cosmo-swift-sdk", from: "0.5.0"),
 ],
 targets: [
     .target(
@@ -36,8 +43,13 @@ targets: [
 ```
 
 Or add via Xcode: **File → Add Package Dependencies…**, paste
-`https://github.com/socratic-ai/cosmo-swift-sdk`, and pick
-**Up to Next Minor Version**.
+`https://github.com/socratic-ai/cosmo-swift-sdk`, and keep the default
+**Up to Next Major Version**.
+
+The `from:` range accepts every release below 1.0, and the
+[documentation](https://platform.askcosmo.ai/docs) describes the latest
+release — if a documented API is missing in your build, run
+`swift package update` first.
 
 ## Teach your agent
 
@@ -403,7 +415,7 @@ suppresses it before the handler is invoked.
 ## Skills
 
 Attach **Agent Skills** (the `SKILL.md` standard) to the model through the
-`Agent` layer. Parsed skills become a single resident `cosmo_sdk_load_skill`
+`RealtimeAgent` layer. Parsed skills become a single resident `cosmo_sdk_load_skill`
 tool plus a hot-set menu appended to `SessionConfig.instructions`; the model
 calls `cosmo_sdk_load_skill(name)` when the conversation reaches a skill's path
 and receives the body as private, never-spoken instructions for the rest of the
@@ -411,7 +423,7 @@ call.
 
 ```swift
 let skills = [try parseSkillMd(refundsMarkdown, defaultName: "refunds")]
-let agent = try Agent(skills: skills)
+let agent = try RealtimeAgent(skills: skills)
 let session = try await agent.start(
     RealtimeSession.Options(token: jwt),
     config: SessionConfig(instructions: "You are a terse support agent."))
@@ -419,8 +431,8 @@ let session = try await agent.start(
 await session.end()
 ```
 
-`Agent.init` **throws**: duplicate skill names are rejected when the agent is
-built, not mid-call. `Agent` composes skills, MCP, and caller tools together —
+`RealtimeAgent.init` **throws**: duplicate skill names are rejected when the agent is
+built, not mid-call. `RealtimeAgent` composes skills, MCP, and caller tools together —
 all land in `SessionConfig.tools`. Every attached skill rides resident as
 `name` + `description`; only the body is deferred to `cosmo_sdk_load_skill`. Unknown
 `SKILL.md` frontmatter keys (`tier`, `allowed-tools`, `license`, …) are
@@ -431,17 +443,17 @@ accepted and ignored, so documents authored for other harnesses stay valid.
 ## MCP servers (local stdio)
 
 Expose a local [MCP](https://modelcontextprotocol.io) server's tools to the
-realtime model through the `Agent` layer. Declare servers in a Claude-Code
+realtime model through the `RealtimeAgent` layer. Declare servers in a Claude-Code
 `.mcp.json`; the SDK spawns each, lists its tools, and proxies calls — tools are
 namespaced `mcp__<server>__<tool>` and ride in `SessionConfig.tools` as ordinary
 client tools.
 
 ```swift
 let registry = try McpRegistry.fromConfigFile(url)
-let agent = try Agent(mcp: registry)
+let agent = try RealtimeAgent(mcp: registry)
 let session = try await agent.start(
     RealtimeSession.Options(token: jwt))
-// drive session.session.events … ; then:
+// drive session.events … ; then:
 await session.end()
 ```
 
@@ -471,6 +483,14 @@ deployment has the default voice stack configured (`realtimeVoiceAvailable`).
 for a minted token — it runs on an end user's device, which isn't told whose
 workspace it belongs to. Only a credential the server rejects throws
 (`VerifyError`); an under-scoped one comes back as a result.
+
+`session.usage()` fetches the session's usage summary over REST — duration,
+talk time, and token counts in provider-reported units — during the session or
+after it ends. `usageStatus` reports whether the detailed summary is there:
+`.pending` while it may still land, `.recorded` once the numbers are final,
+`.unavailable` when none was written and none will be. `tokens` is nil when
+the provider doesn't report token usage. Throws `UsageError`.
+`RealtimeClient(options).sessionUsage(sessionId:)` is the client-level form.
 
 ## Architecture
 

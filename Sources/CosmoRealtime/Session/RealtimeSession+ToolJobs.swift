@@ -11,14 +11,14 @@ extension RealtimeSession {
     /// outcome. Called by ``ClientToolJobSink`` when a job completes/fails.
     func _sendToolJobResult(_ result: BackgroundToolResult) async throws {
         try _assertSendable()
-        let resultPayload: CosmoRealtimeAPI.Components.Schemas.RealtimeToolJobResult.ResultPayload?
+        let resultPayload: CosmoRealtimeAPI.Components.Schemas.ToolJobResult.ResultPayload?
         if let object = result.result {
             resultPayload = .init(additionalProperties: try objectContainer(from: object))
         } else {
             resultPayload = nil
         }
         try await _publish(
-            CosmoRealtimeAPI.Components.Schemas.RealtimeToolJobResult(
+            CosmoRealtimeAPI.Components.Schemas.ToolJobResult(
                 error: result.error,
                 jobId: result.jobId,
                 result: resultPayload,

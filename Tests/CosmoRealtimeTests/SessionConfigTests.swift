@@ -19,11 +19,17 @@ struct SessionConfigTests {
         return nested
     }
 
-    @Test("wire payload carries type and version; unset fields stay absent")
+    @Test("wire payload carries type and SDK identity; unset fields stay absent")
     func defaultsStayAbsent() throws {
         let fields = try encodedFields(SessionConfig())
         #expect(fields["type"] == .string("session-config"))
-        #expect(fields["version"] == .string(RealtimeSession.protocolVersion))
+        #expect(
+            fields["sdk"]
+                == .object([
+                    "name": .string(RealtimeSession.sdkName),
+                    "version": .string(RealtimeSession.sdkVersion),
+                ])
+        )
         // Empty agent/session sub-objects stay off the wire entirely.
         for absent in ["agent", "session"] {
             #expect(fields[absent] == nil, "expected \(absent) to stay off the wire")
@@ -177,6 +183,44 @@ struct SessionConfigTests {
         #expect(modelOptions["silence_duration_ms"] == .int(200))
         #expect(modelOptions["prefix_padding_ms"] == .int(100))
         #expect(modelOptions["temperature"] == nil)
+    }
+
+    @Test("Gemini cosmoVad selection and its tuning block serialize under their wire names")
+    func geminiCosmoVadSerializes() throws {
+        let fields = try encodedFields(
+            SessionConfig(
+                modelOptions: .gemini(
+                    turnDetection: .cosmoVad(pauseMs: 250, prefixMs: 300, maxHoldMs: 900)
+                )
+            )
+        )
+        guard let agent = object(fields, "agent"),
+            let modelOptions = object(agent, "model_options")
+        else {
+            Issue.record("expected a model_options sub-object under agent")
+            return
+        }
+        #expect(modelOptions["turn_detection"] == .string("cosmo_vad"))
+        #expect(
+            modelOptions["cosmo_vad"]
+                == .object([
+                    "pause_ms": .int(250),
+                    "prefix_ms": .int(300),
+                    "max_hold_ms": .int(900),
+                ]))
+        #expect(modelOptions["silence_duration_ms"] == nil)
+
+        let serverVad = try encodedFields(
+            SessionConfig(modelOptions: .gemini(turnDetection: .serverVad))
+        )
+        guard let serverAgent = object(serverVad, "agent"),
+            let serverOptions = object(serverAgent, "model_options")
+        else {
+            Issue.record("expected a model_options sub-object under agent")
+            return
+        }
+        #expect(serverOptions["turn_detection"] == .string("server_vad"))
+        #expect(serverOptions["cosmo_vad"] == nil)
     }
 
     @Test("an unconfigured OpenAI block carries only the discriminator")

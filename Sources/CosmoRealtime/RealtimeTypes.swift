@@ -39,7 +39,7 @@ public struct Cancellable: Sendable {
 
 // MARK: - Errors
 
-public enum CosmoRealtimeError: Error, LocalizedError, Equatable {
+public enum RealtimeError: Error, LocalizedError, Equatable {
     /// REST session-start failed.
     case sessionStartFailed(message: String)
     case notConnected

@@ -52,7 +52,7 @@ extension RealtimeClient {
 
     package static func _rejected<Failure: RealtimeRESTError>(
         as _: Failure.Type,
-        _ envelope: Components.Schemas.RealtimeErrorEnvelope?
+        _ envelope: Components.Schemas.ErrorEnvelope?
     ) -> Failure {
         guard let envelope else {
             return .rejected(code: nil, detail: "Unprocessable content")

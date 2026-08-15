@@ -16,7 +16,7 @@ import Foundation
 /// on anything else.
 ///
 /// Resolution semantics are pinned by the cross-SDK conformance vectors at
-/// `sdks/cosmo-realtime/contract/credentials-resolution-vectors.json`.
+/// `credentials-resolution-vectors.json`.
 public enum CredentialsError: Error, LocalizedError, Equatable {
     /// No credential anywhere: nothing passed, `COSMO_API_KEY` unset, and
     /// the credentials file absent. The message names every way to supply one.

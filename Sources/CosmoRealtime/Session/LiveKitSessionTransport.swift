@@ -100,10 +100,10 @@ actor LiveKitSessionTransport: SessionTransport {
         micMuted: Bool
     ) async throws -> SessionStartInfo {
         let handshakeStart = Date()
-        let config: CosmoRealtimeAPI.Components.Schemas.RealtimeSessionConfig
+        let config: CosmoRealtimeAPI.Components.Schemas.SessionConfig
         do {
             config = try JSONDecoder().decode(
-                CosmoRealtimeAPI.Components.Schemas.RealtimeSessionConfig.self,
+                CosmoRealtimeAPI.Components.Schemas.SessionConfig.self,
                 from: configFrame
             )
         } catch {
@@ -132,7 +132,7 @@ actor LiveKitSessionTransport: SessionTransport {
         // The resolved REST start plus its completion instant. On the fast
         // path it settles concurrently with the join; on the serialized path
         // it has already resolved when awaited below.
-        let startTask: Task<(CosmoRealtimeAPI.Components.Schemas.RealtimeSessionResponse, Date), Error>
+        let startTask: Task<(CosmoRealtimeAPI.Components.Schemas.SessionResponse, Date), Error>
         if let prepared {
             let ageMs = Int(Date().timeIntervalSince(prepared.preparedAt) * 1000)
             Self.log.notice(
@@ -202,7 +202,7 @@ actor LiveKitSessionTransport: SessionTransport {
             try await self._joinRoom(newRoom, url: joinURL, token: joinToken, micMuted: micMuted)
         }
 
-        let session: CosmoRealtimeAPI.Components.Schemas.RealtimeSessionResponse
+        let session: CosmoRealtimeAPI.Components.Schemas.SessionResponse
         let restDoneAt: Date
         // Set once the prepared join has been given up on, so the dispatched
         // room is joined instead.
@@ -380,7 +380,7 @@ actor LiveKitSessionTransport: SessionTransport {
     /// token. The path taken whenever a prepared room could not be used —
     /// refused at start, or not honored.
     private func _joinDispatchedRoom(
-        session: CosmoRealtimeAPI.Components.Schemas.RealtimeSessionResponse,
+        session: CosmoRealtimeAPI.Components.Schemas.SessionResponse,
         callbacks: SessionTransportCallbacks,
         clientToolHandlers: [String: ClientToolHandler],
         backgroundClientToolHandlers: [String: BackgroundClientToolHandler],
@@ -463,7 +463,7 @@ actor LiveKitSessionTransport: SessionTransport {
                     await room.disconnect()
                 }
             )
-        } catch CosmoRealtimeError.connectTimeout {
+        } catch RealtimeError.connectTimeout {
             throw SessionStartFailure.transport(
                 message: "LiveKit Room.connect timed out after \(options.connectTimeout)s"
             )
@@ -733,8 +733,8 @@ actor LiveKitSessionTransport: SessionTransport {
     /// run it in a parallel task while the room join proceeds.
     private static func _callStart(
         client: CosmoRealtimeAPI.Client,
-        config: CosmoRealtimeAPI.Components.Schemas.RealtimeSessionConfig
-    ) async throws -> CosmoRealtimeAPI.Components.Schemas.RealtimeSessionResponse {
+        config: CosmoRealtimeAPI.Components.Schemas.SessionConfig
+    ) async throws -> CosmoRealtimeAPI.Components.Schemas.SessionResponse {
         let output: CosmoRealtimeAPI.Operations.StartRealtimeSession.Output
         do {
             output = try await client.startRealtimeSession(body: .json(config))

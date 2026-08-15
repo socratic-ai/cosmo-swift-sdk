@@ -334,7 +334,7 @@ func validateMatcher(_ pattern: String) throws {
     }
 }
 
-// Normative grammar is pinned by ../../contract/hook-matcher-vectors.json
+// Normative grammar is pinned by the shared hook-matcher vectors
 // (shared with the Python suite); internal so the conformance test can
 // execute the vectors directly.
 func toolNameMatches(_ name: String, _ pattern: String?) -> Bool {

@@ -3,9 +3,9 @@ import Foundation
 import OpenAPIRuntime
 
 /// Developer-facing names for the generated credential-preflight types.
-public typealias CredentialInfo = CosmoRealtimeAPI.Components.Schemas.RealtimeVerifyResponse
-public typealias VerifyWorkspace = CosmoRealtimeAPI.Components.Schemas.RealtimeVerifyWorkspace
-public typealias CredentialKind = CosmoRealtimeAPI.Components.Schemas.RealtimeCredentialKind
+public typealias CredentialInfo = CosmoRealtimeAPI.Components.Schemas.VerifyResponse
+public typealias WorkspaceInfo = CosmoRealtimeAPI.Components.Schemas.WorkspaceInfo
+public typealias CredentialKind = CosmoRealtimeAPI.Components.Schemas.CredentialKind
 
 /// A dedicated error type for ``RealtimeClient/verify()``, following
 /// ``MintTokenError``. An under-scoped credential is not an error here — it

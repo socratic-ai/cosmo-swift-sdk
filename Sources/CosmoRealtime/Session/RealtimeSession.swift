@@ -33,9 +33,16 @@ public actor RealtimeSession {
 
     static let log = Logger(subsystem: CosmoRealtimeLog.subsystem, category: "session")
 
-    /// Wire-protocol version this session API speaks, carried on the
-    /// ``session-config`` start payload.
-    public static let protocolVersion = "1.0"
+    /// Package name, sent with ``sdkVersion`` as the SDK identity on every
+    /// Cosmo REST call.
+    public static let sdkName = "cosmo-swift-sdk"
+
+    /// Package version, sent as the SDK identity on every Cosmo REST call
+    /// and on the ``session-config`` start payload.
+    public static let sdkVersion = "0.5.0"
+
+    /// The ``X-Cosmo-SDK`` header value carried on every Cosmo REST call.
+    static let sdkIdentityHeaderValue = "\(sdkName)/\(sdkVersion)"
 
     /// Hard ceiling on a base64 image payload, mirroring the server-side
     /// ingress bound (`_MAX_IMAGE_B64_LEN`) so a frame the server would refuse
@@ -311,6 +318,9 @@ public actor RealtimeSession {
     // session's backend, credential, and TLS policy (e.g. ``dial``). ``nil``
     // when the session was constructed directly over a fake transport in tests.
     let options: Options?
+    // Built on the first out-of-band REST read and kept, so polling a session
+    // does not stand up a URLSession per call.
+    var restClient: RealtimeClient?
     private let reassembler = EnvelopeReassembler()
     private var lifecycle: Lifecycle = .idle
     private var hooks: HookEngine?
@@ -377,6 +387,20 @@ public actor RealtimeSession {
     /// Tasks parked in ``waitUntilAgentLive()``. Resumed by the agent-track
     /// signal, or by ``_close`` so a session that dies first never hangs them.
     private var agentLiveWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Resource teardown bound to this session's lifetime, run once by
+    /// ``_close`` before any end-waiter wakes.
+    private var onClose: (@Sendable () async -> Void)?
+
+    /// Bind teardown to this session's close. Runs once — immediately if the
+    /// session has already closed.
+    func _attachOnClose(_ handler: @escaping @Sendable () async -> Void) async {
+        if case .closed = lifecycle {
+            await handler()
+            return
+        }
+        onClose = handler
+    }
 
     // MARK: Audio levels
 
@@ -639,7 +663,7 @@ public actor RealtimeSession {
     public func send(text: String) async throws {
         try _assertSendable()
         try await _publish(
-            CosmoRealtimeAPI.Components.Schemas.RealtimeClientText(
+            CosmoRealtimeAPI.Components.Schemas.ClientText(
                 content: text,
                 _type: .sendText
             )
@@ -655,7 +679,7 @@ public actor RealtimeSession {
     public func send(context: String) async throws {
         try _assertSendable()
         try await _publish(
-            CosmoRealtimeAPI.Components.Schemas.RealtimeClientContext(
+            CosmoRealtimeAPI.Components.Schemas.ClientContext(
                 content: context,
                 _type: .sendContext
             )
@@ -669,7 +693,7 @@ public actor RealtimeSession {
     public func setMuted(_ muted: Bool) async throws {
         try _assertSendable()
         try await _publish(
-            CosmoRealtimeAPI.Components.Schemas.RealtimeClientMute(muted: muted, _type: .mute)
+            CosmoRealtimeAPI.Components.Schemas.ClientMute(muted: muted, _type: .mute)
         )
         try await transport.setMicrophoneEnabled(!muted)
         lastSetMuted = muted
@@ -679,7 +703,7 @@ public actor RealtimeSession {
     public func ping() async throws {
         try _assertSendable()
         try await _publish(
-            CosmoRealtimeAPI.Components.Schemas.RealtimeClientPing(_type: .ping)
+            CosmoRealtimeAPI.Components.Schemas.ClientPing(_type: .ping)
         )
     }
 
@@ -764,7 +788,7 @@ public actor RealtimeSession {
         streamId: String
     ) async throws {
         try await _publish(
-            CosmoRealtimeAPI.Components.Schemas.RealtimeClientImage(
+            CosmoRealtimeAPI.Components.Schemas.ClientImage(
                 data: base64,
                 mimeType: mimeType,
                 streamId: streamId,
@@ -867,7 +891,7 @@ public actor RealtimeSession {
     public func sendActivityEnd() async throws {
         try _assertSendable()
         try await _publish(
-            CosmoRealtimeAPI.Components.Schemas.RealtimeClientActivityEnd(_type: .activityEnd)
+            CosmoRealtimeAPI.Components.Schemas.ClientActivityEnd(_type: .activityEnd)
         )
     }
 
@@ -902,6 +926,9 @@ public actor RealtimeSession {
 
     /// Gracefully end the session: best-effort wire ``end`` frame, then
     /// terminal teardown with ``EndReason/clientEnded``. Idempotent.
+    /// Teardown is immediate — events still in flight are dropped, so
+    /// consume the turn's final transcript event before ending if you
+    /// need it.
     public func end() async {
         let canSend: Bool
         switch lifecycle {
@@ -911,7 +938,7 @@ public actor RealtimeSession {
         if canSend {
             do {
                 try await _publish(
-                    CosmoRealtimeAPI.Components.Schemas.RealtimeClientEnd(_type: .end)
+                    CosmoRealtimeAPI.Components.Schemas.ClientEnd(_type: .end)
                 )
             } catch {
                 // Best-effort: the transport may already be gone. Record it
@@ -1019,7 +1046,7 @@ public actor RealtimeSession {
     private func _resendMute(_ muted: Bool) async {
         do {
             try await _publish(
-                CosmoRealtimeAPI.Components.Schemas.RealtimeClientMute(muted: muted, _type: .mute)
+                CosmoRealtimeAPI.Components.Schemas.ClientMute(muted: muted, _type: .mute)
             )
         } catch {
             Self.log.warning("mute re-assert after reconnect failed: \(error.localizedDescription, privacy: .public)")
@@ -1032,7 +1059,7 @@ public actor RealtimeSession {
     private func _sendBindInput() async {
         do {
             try await _publish(
-                CosmoRealtimeAPI.Components.Schemas.RealtimeClientBindInput(_type: .bindInput)
+                CosmoRealtimeAPI.Components.Schemas.ClientBindInput(_type: .bindInput)
             )
         } catch {
             Self.log.warning(
@@ -1109,6 +1136,10 @@ public actor RealtimeSession {
         eventsContinuation.finish()
         agentLiveContinuation.finish()
         await transport.close()
+        if let onClose {
+            self.onClose = nil
+            await onClose()
+        }
         // Last: a waiter that wakes up sees a fully torn-down session. The
         // agent-live waiters are released too — the agent never showed, and
         // leaving them parked would hang the caller past the session.

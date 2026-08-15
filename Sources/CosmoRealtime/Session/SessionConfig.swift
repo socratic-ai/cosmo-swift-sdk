@@ -4,12 +4,12 @@ import Foundation
 /// Tier-2 server hook: perform an action after sustained customer
 /// silence. Wire config — serialized in the agent block and executed
 /// server-side, so it works with no client attached (telephony).
-public typealias SilenceTimeout = CosmoRealtimeAPI.Components.Schemas.RealtimeSilenceTimeout
+public typealias SilenceTimeout = CosmoRealtimeAPI.Components.Schemas.SilenceTimeout
 /// Idle-message action for ``SilenceTimeout``: ``text`` = exact words,
 /// ``prompt`` = model-generated, both nil = free model speech.
-public typealias Say = CosmoRealtimeAPI.Components.Schemas.RealtimeSay
+public typealias Say = CosmoRealtimeAPI.Components.Schemas.Say
 /// End-call action for ``SilenceTimeout``.
-public typealias EndCall = CosmoRealtimeAPI.Components.Schemas.RealtimeEndCall
+public typealias EndCall = CosmoRealtimeAPI.Components.Schemas.EndCall
 
 /// Per-session configuration for ``RealtimeSession/start(_:config:)``.
 ///
@@ -60,7 +60,7 @@ public struct SessionConfig: Sendable, Equatable {
     public var greeting: String?
     /// When set, the server resumes the named prior session. Carried
     /// under ``RealtimeSessionParams/experimental`` — an unstable knob
-    /// that may change shape without a protocol-version bump.
+    /// that may change shape between releases.
     public var resumeSessionId: String?
     /// Requested wall-clock cap on the session, in seconds. The server resolves
     /// the effective cap as the minimum of this and its own limits — a client
@@ -68,9 +68,20 @@ public struct SessionConfig: Sendable, Equatable {
     /// ``ready``. ``nil`` requests no client-side cap.
     public var maxSessionSeconds: Int?
     /// Persist this run's recording artifacts (audio/video/transcript/tool
-    /// events) server-side. Per-run option, not agent config. ``nil`` keeps
-    /// the server default: the session records.
+    /// events) server-side. Per-run option, not agent config. ``nil`` stores
+    /// as much as the account's consents allow. The per-artifact properties
+    /// below win over this one.
     public var storeRecording: Bool?
+    /// Persist this run's audio. Narrowing only: a session can request less
+    /// storage than the account permits, never more. ``nil`` defers to
+    /// ``storeRecording``, then to those consents.
+    public var storeAudio: Bool?
+    /// Persist this run's transcript and tool-call events. Same contract as
+    /// ``storeAudio``.
+    public var storeTranscript: Bool?
+    /// Persist this run's screen-share video and screenshots. Same contract
+    /// as ``storeAudio``.
+    public var storeVideo: Bool?
     /// One list, two kinds of hooks: in-process client hooks built by the
     /// seam factories (``sessionStart(_:)``, ``preToolUse(matcher:_:)``, …;
     /// list order is fold order) and declarative server hooks
@@ -94,6 +105,9 @@ public struct SessionConfig: Sendable, Equatable {
         resumeSessionId: String? = nil,
         maxSessionSeconds: Int? = nil,
         storeRecording: Bool? = nil,
+        storeAudio: Bool? = nil,
+        storeTranscript: Bool? = nil,
+        storeVideo: Bool? = nil,
         hooks: [Hook]? = nil
     ) {
         self.agentName = agentName
@@ -109,6 +123,9 @@ public struct SessionConfig: Sendable, Equatable {
         self.resumeSessionId = resumeSessionId
         self.maxSessionSeconds = maxSessionSeconds
         self.storeRecording = storeRecording
+        self.storeAudio = storeAudio
+        self.storeTranscript = storeTranscript
+        self.storeVideo = storeVideo
         self.hooks = hooks
     }
 
@@ -128,6 +145,9 @@ public struct SessionConfig: Sendable, Equatable {
             && lhs.resumeSessionId == rhs.resumeSessionId
             && lhs.maxSessionSeconds == rhs.maxSessionSeconds
             && lhs.storeRecording == rhs.storeRecording
+            && lhs.storeAudio == rhs.storeAudio
+            && lhs.storeTranscript == rhs.storeTranscript
+            && lhs.storeVideo == rhs.storeVideo
             && lhs.serverHooks == rhs.serverHooks
     }
 
@@ -148,7 +168,7 @@ public struct SessionConfig: Sendable, Equatable {
         }
 
         /// ``nil`` when nothing is set, so an empty block stays off the wire.
-        var wire: CosmoRealtimeAPI.Components.Schemas.RealtimeVoiceConfig? {
+        var wire: CosmoRealtimeAPI.Components.Schemas.VoiceConfig? {
             if name == nil && speakingStyle == nil { return nil }
             return .init(name: name, speakingStyle: speakingStyle)
         }
@@ -172,7 +192,7 @@ public struct SessionConfig: Sendable, Equatable {
 
         /// Never ``nil`` — presence is what enables the bed, so an empty
         /// object still crosses the wire.
-        var wire: CosmoRealtimeAPI.Components.Schemas.RealtimeAmbienceConfig {
+        var wire: CosmoRealtimeAPI.Components.Schemas.AmbienceConfig {
             .init(gainDb: gainDb, track: track.flatMap { .init(rawValue: $0) })
         }
     }
@@ -205,7 +225,7 @@ public struct SessionConfig: Sendable, Equatable {
         }
 
         /// ``nil`` when nothing is set, so an empty block stays off the wire.
-        var wire: CosmoRealtimeAPI.Components.Schemas.RealtimeAudioConfig? {
+        var wire: CosmoRealtimeAPI.Components.Schemas.AudioConfig? {
             if output == nil && noiseCancellation == nil && ambience == nil {
                 return nil
             }
@@ -222,11 +242,37 @@ public struct SessionConfig: Sendable, Equatable {
     public typealias InterruptionSensitivity =
         CosmoRealtimeAPI.Components.Schemas.InterruptionSensitivity
     public typealias ThinkingLevel =
-        CosmoRealtimeAPI.Components.Schemas.RealtimeThinkingLevel
+        CosmoRealtimeAPI.Components.Schemas.ThinkingLevel
     public typealias EndOfSpeechSensitivity =
-        CosmoRealtimeAPI.Components.Schemas.RealtimeEndOfSpeechSensitivity
+        CosmoRealtimeAPI.Components.Schemas.EndOfSpeechSensitivity
     public typealias SemanticEagerness =
-        CosmoRealtimeAPI.Components.Schemas.RealtimeSemanticEagerness
+        CosmoRealtimeAPI.Components.Schemas.SemanticEagerness
+    public typealias TurnDetectionMode =
+        CosmoRealtimeAPI.Components.Schemas.TurnDetectionMode
+
+    /// Which turn detector ends the user's turn on Gemini. ``cosmoVad`` is
+    /// Cosmo's own semantic detector, also the default when ``turnDetection``
+    /// is ``nil`` — a pause triggers one end-of-turn inference, so a
+    /// mid-thought pause holds the turn open. ``serverVad`` opts the session
+    /// into the provider's fixed silence window. Each detector owns its
+    /// knobs: ``endOfSpeechSensitivity``, ``silenceDurationMs`` and
+    /// ``prefixPaddingMs`` tune ``serverVad`` and the server rejects them
+    /// alongside ``cosmoVad``, whose own knobs ride the case.
+    public enum GeminiTurnDetection: Sendable, Equatable {
+        /// Ends the turn after a fixed window of silence.
+        case serverVad
+        /// Ends the turn as soon as the utterance reads as complete.
+        /// ``pauseMs`` is the silence that triggers the inference,
+        /// ``prefixMs`` the audio kept from before speech was detected, and
+        /// ``maxHoldMs`` the total silence after which the turn ends
+        /// regardless of the classifier's verdict. ``nil`` keeps the server
+        /// default.
+        case cosmoVad(
+            pauseMs: Int? = nil,
+            prefixMs: Int? = nil,
+            maxHoldMs: Int? = nil
+        )
+    }
 
     /// Which OpenAI-Realtime turn detector runs, and the knobs it reads. Each
     /// detector carries only its own, so pairing ``eagerness`` with the fixed
@@ -248,9 +294,15 @@ public struct SessionConfig: Sendable, Equatable {
     /// ``gemini`` — so an illegal pairing is unrepresentable. ``model`` on
     /// ``SessionConfig`` selects the concrete model within the chosen provider.
     public enum ModelOptions: Sendable, Equatable {
-        /// Gemini-realtime knobs. ``endOfSpeechSensitivity``,
-        /// ``silenceDurationMs`` and ``prefixPaddingMs`` bind endpointing —
-        /// how long the model waits before deciding the user's turn is over.
+        /// Gemini-realtime knobs. ``turnDetection`` selects the end-of-turn
+        /// detector: ``nil`` (the default) and ``.cosmoVad`` are Cosmo's
+        /// semantic turn detection, which classifies whether the utterance
+        /// reads as finished instead of timing a silence window;
+        /// ``.serverVad`` opts the session into the provider's
+        /// silence-window detection, which is what
+        /// ``endOfSpeechSensitivity``, ``silenceDurationMs`` and
+        /// ``prefixPaddingMs`` tune (they are unread under the default
+        /// detector).
         case gemini(
             temperature: Double? = nil,
             maxOutputTokens: Int? = nil,
@@ -258,7 +310,8 @@ public struct SessionConfig: Sendable, Equatable {
             includeThoughts: Bool? = nil,
             endOfSpeechSensitivity: EndOfSpeechSensitivity? = nil,
             silenceDurationMs: Int? = nil,
-            prefixPaddingMs: Int? = nil
+            prefixPaddingMs: Int? = nil,
+            turnDetection: GeminiTurnDetection? = nil
         )
         /// OpenAI Realtime — pins its own sampling and token limits, so
         /// ``turnDetection`` is the only thing to tune. ``nil`` keeps the
@@ -267,10 +320,12 @@ public struct SessionConfig: Sendable, Equatable {
         /// OpenAI Realtime mini tier — the same API on a faster, cheaper
         /// model, and equally untunable today.
         case openaiMini
+        /// xAI Grok Voice — untunable today, like the OpenAI mini tier.
+        case grok
 
         /// The provider-scoped wire block: only the selected provider's knobs
         /// cross the wire, with the discriminator set explicitly.
-        var wire: CosmoRealtimeAPI.Components.Schemas.RealtimeInlineAgentConfig
+        var wire: CosmoRealtimeAPI.Components.Schemas.InlineAgentConfig
             .ModelOptionsPayload
         {
             switch self {
@@ -281,10 +336,30 @@ public struct SessionConfig: Sendable, Equatable {
                 includeThoughts,
                 endOfSpeechSensitivity,
                 silenceDurationMs,
-                prefixPaddingMs
+                prefixPaddingMs,
+                turnDetection
             ):
+                let wireTurnDetection:
+                    CosmoRealtimeAPI.Components.Schemas.TurnDetectionMode?
+                var cosmoVad: CosmoRealtimeAPI.Components.Schemas.CosmoVadConfig?
+                switch turnDetection {
+                case nil:
+                    wireTurnDetection = nil
+                case .serverVad:
+                    wireTurnDetection = .serverVad
+                case let .cosmoVad(pauseMs, prefixMs, maxHoldMs):
+                    wireTurnDetection = .cosmoVad
+                    if pauseMs != nil || prefixMs != nil || maxHoldMs != nil {
+                        cosmoVad = .init(
+                            maxHoldMs: maxHoldMs,
+                            pauseMs: pauseMs,
+                            prefixMs: prefixMs
+                        )
+                    }
+                }
                 return .gemini(
                     .init(
+                        cosmoVad: cosmoVad,
                         endOfSpeechSensitivity: endOfSpeechSensitivity,
                         includeThoughts: includeThoughts,
                         maxOutputTokens: maxOutputTokens,
@@ -292,10 +367,13 @@ public struct SessionConfig: Sendable, Equatable {
                         provider: .gemini,
                         silenceDurationMs: silenceDurationMs,
                         temperature: temperature,
-                        thinkingLevel: thinkingLevel
+                        thinkingLevel: thinkingLevel,
+                        turnDetection: wireTurnDetection
                     ))
             case .openaiMini:
                 return .openaiMini(.init(provider: .openaiMini))
+            case .grok:
+                return .grok(.init(provider: .grok))
             case let .openai(turnDetection):
                 switch turnDetection {
                 case nil:
@@ -515,14 +593,14 @@ extension SessionConfig {
         splitHooks(hooks ?? []).engine
     }
 
-    /// The ``session-config`` wire payload: the protocol version and only
+    /// The ``session-config`` wire payload: the SDK identity and only
     /// the fields the caller actually set. Agent-scoped knobs nest under
     /// ``RealtimeSessionConfig/agent``; session-scoped ones under
     /// ``RealtimeSessionConfig/session``. A sub-object with no set fields
     /// stays off the wire entirely, same as an unset leaf.
-    func wirePayload() throws -> CosmoRealtimeAPI.Components.Schemas.RealtimeSessionConfig {
+    func wirePayload() throws -> CosmoRealtimeAPI.Components.Schemas.SessionConfig {
         try assertNoReservedToolNames()
-        let agent: CosmoRealtimeAPI.Components.Schemas.RealtimeSessionConfig.AgentPayload?
+        let agent: CosmoRealtimeAPI.Components.Schemas.SessionConfig.AgentPayload?
         if let agentName {
             // The catalog variant carries only per-run ride-alongs; a
             // stored-config field alongside the handle is a client-side
@@ -563,7 +641,7 @@ extension SessionConfig {
             let wireTools = try tools.flatMap { specs in
                 specs.isEmpty ? nil : try specs.map { try $0.inlineWirePayload() }
             }
-            let inline = CosmoRealtimeAPI.Components.Schemas.RealtimeInlineAgentConfig(
+            let inline = CosmoRealtimeAPI.Components.Schemas.InlineAgentConfig(
                 audio: audio?.wire,
                 greeting: greeting,
                 hooks: serverHooks,
@@ -579,16 +657,19 @@ extension SessionConfig {
             // agent — omit the block entirely.
             agent = inline == .init(_type: .inline) ? nil : .inline(inline)
         }
-        let session = CosmoRealtimeAPI.Components.Schemas.RealtimeSessionParams(
+        let session = CosmoRealtimeAPI.Components.Schemas.SessionParams(
             experimental: resumeSessionId.map { .init(resumeSessionId: $0) },
             maxSessionSeconds: maxSessionSeconds,
-            storeRecording: storeRecording
+            storeAudio: storeAudio,
+            storeRecording: storeRecording,
+            storeTranscript: storeTranscript,
+            storeVideo: storeVideo
         )
-        return CosmoRealtimeAPI.Components.Schemas.RealtimeSessionConfig(
+        return CosmoRealtimeAPI.Components.Schemas.SessionConfig(
             agent: agent,
+            sdk: .init(name: RealtimeSession.sdkName, version: RealtimeSession.sdkVersion),
             session: session == .init() ? nil : session,
-            _type: .sessionConfig,
-            version: RealtimeSession.protocolVersion
+            _type: .sessionConfig
         )
     }
 
@@ -649,7 +730,7 @@ extension SessionConfig.Tool {
     // The generator emits a structurally-identical but distinct tools
     // payload type per agent variant, so each variant gets its own mapping.
     fileprivate func inlineWirePayload() throws
-        -> CosmoRealtimeAPI.Components.Schemas.RealtimeInlineAgentConfig.ToolsPayloadPayload
+        -> CosmoRealtimeAPI.Components.Schemas.InlineAgentConfig.ToolsPayloadPayload
     {
         switch self {
         case .sdkClient(let sdkTool):
@@ -687,7 +768,7 @@ extension SessionConfig.Tool {
     }
 
     fileprivate func catalogWirePayload() throws
-        -> CosmoRealtimeAPI.Components.Schemas.RealtimeCatalogAgentConfig.ToolsPayloadPayload
+        -> CosmoRealtimeAPI.Components.Schemas.CatalogAgentConfig.ToolsPayloadPayload
     {
         switch self {
         case .sdkClient(let sdkTool):

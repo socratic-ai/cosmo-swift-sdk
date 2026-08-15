@@ -6,21 +6,21 @@ import Foundation
 // generated structs are the source of truth for field shapes — they
 // regenerate from ``external-openapi.json`` on every build.
 extension RealtimeSession {
-    public typealias Ready = CosmoRealtimeAPI.Components.Schemas.RealtimeReady
-    public typealias TranscriptDelta = CosmoRealtimeAPI.Components.Schemas.RealtimeTranscriptDelta
-    public typealias ModelText = CosmoRealtimeAPI.Components.Schemas.RealtimeModelText
-    public typealias TurnComplete = CosmoRealtimeAPI.Components.Schemas.RealtimeTurnComplete
-    public typealias ToolCall = CosmoRealtimeAPI.Components.Schemas.RealtimeToolCall
-    public typealias ToolDispatchStarted = CosmoRealtimeAPI.Components.Schemas.RealtimeToolDispatchStarted
-    public typealias ToolResult = CosmoRealtimeAPI.Components.Schemas.RealtimeToolResult
-    public typealias ToolInvocation = CosmoRealtimeAPI.Components.Schemas.RealtimeToolInvocation
-    public typealias Reconnecting = CosmoRealtimeAPI.Components.Schemas.RealtimeReconnecting
-    public typealias ErrorEvent = CosmoRealtimeAPI.Components.Schemas.RealtimeError
-    public typealias ErrorCode = CosmoRealtimeAPI.Components.Schemas.RealtimeErrorCode
-    public typealias RejectedTool = CosmoRealtimeAPI.Components.Schemas.RealtimeRejectedTool
-    public typealias ResolvedAgent = CosmoRealtimeAPI.Components.Schemas.RealtimeResolvedAgent
-    public typealias CosmoUsage = CosmoRealtimeAPI.Components.Schemas.RealtimeCosmoUsage
-    public typealias UserSpeechTimeout = CosmoRealtimeAPI.Components.Schemas.RealtimeUserSpeechTimeout
+    public typealias Ready = CosmoRealtimeAPI.Components.Schemas.ReadyEvent
+    public typealias TranscriptDelta = CosmoRealtimeAPI.Components.Schemas.TranscriptDeltaEvent
+    public typealias ModelText = CosmoRealtimeAPI.Components.Schemas.ModelTextEvent
+    public typealias TurnComplete = CosmoRealtimeAPI.Components.Schemas.TurnCompleteEvent
+    public typealias ToolCall = CosmoRealtimeAPI.Components.Schemas.ToolCallEvent
+    public typealias ToolDispatchStarted = CosmoRealtimeAPI.Components.Schemas.ToolDispatchStartedEvent
+    public typealias ToolResult = CosmoRealtimeAPI.Components.Schemas.ToolResultEvent
+    public typealias ToolInvocation = CosmoRealtimeAPI.Components.Schemas.ToolInvocationEvent
+    public typealias Reconnecting = CosmoRealtimeAPI.Components.Schemas.ReconnectingEvent
+    public typealias ErrorEvent = CosmoRealtimeAPI.Components.Schemas.ErrorEvent
+    public typealias ErrorCode = CosmoRealtimeAPI.Components.Schemas.ErrorCode
+    public typealias RejectedTool = CosmoRealtimeAPI.Components.Schemas.RejectedTool
+    public typealias ResolvedAgent = CosmoRealtimeAPI.Components.Schemas.ResolvedAgent
+    public typealias CosmoUsage = CosmoRealtimeAPI.Components.Schemas.UsageEvent
+    public typealias UserSpeechTimeout = CosmoRealtimeAPI.Components.Schemas.UserSpeechTimeoutEvent
 
     /// Terminal sentinel for ``Event/sessionEnded(_:)``. The server
     /// publishes a ``session-ended`` wire frame best-effort before a
@@ -196,7 +196,7 @@ extension RealtimeSession {
         case "session-ended":
             guard
                 let ended = try? decoder.decode(
-                    CosmoRealtimeAPI.Components.Schemas.RealtimeSessionEnded.self, from: data
+                    CosmoRealtimeAPI.Components.Schemas.SessionEndedEvent.self, from: data
                 )
             else {
                 return .event(.unknown(rawType: probe.type, payload: data))
