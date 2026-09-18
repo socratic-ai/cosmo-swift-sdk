@@ -146,13 +146,13 @@ import Testing
         let ctx = PostToolUseContext(
             toolName: "read_file",
             arguments: [:],
-            outcome: .error("disk error"),
+            outcome: .error(message: "disk error"),
             sessionId: "sess-1"
         )
         await HookEngine(registry).runPostToolUse(ctx)
 
         let seen = await capturedBox.value
-        #expect(seen == .error("disk error"))
+        #expect(seen == .error(message: "disk error"))
     }
 
     // 7. runSessionEnd: throwing hook is isolated — sibling still runs.
@@ -178,10 +178,10 @@ import Testing
     @Test(arguments: ["[delete_*", "tool[0-9", "[!abc", "prefix_[a-z"])
     func malformedMatcherRejectedAtRegistration(pattern: String) {
         var registry: [Hook] = []
-        #expect(throws: MalformedHookMatcherError.self) {
+        #expect(throws: HookError.self) {
             registry.append(try preToolUse(matcher: pattern) { _ in nil })
         }
-        #expect(throws: MalformedHookMatcherError.self) {
+        #expect(throws: HookError.self) {
             registry.append(try postToolUse(matcher: pattern) { _ in })
         }
     }

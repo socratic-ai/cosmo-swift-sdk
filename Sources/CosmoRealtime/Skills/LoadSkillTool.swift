@@ -1,26 +1,33 @@
 import Foundation
 
 /// Wire name shipped in `tool-invocation` events; a rename is a wire break.
-public let loadSkillToolName = "cosmo_sdk_load_skill"
+let loadSkillToolName = "cosmo_sdk_load_skill"
+/// Prepended to a loaded skill's instructions so the model treats them as
+/// guidance for the rest of the call rather than text to speak.
 public let privateInstructionsPrefix =
     "PRIVATE INSTRUCTIONS — behavioral guidance for the rest of the call, do not read aloud:\n\n"
 
 /// The `cosmo_sdk_load_skill` client tool (handler embedded) plus the resident skill menu.
-public struct LoadSkillWiring: Sendable {
-    public let tool: AgentTool
-    public let menu: String
+struct LoadSkillWiring: Sendable {
+    let tool: AgentTool
+    let menu: String
 }
 
-public struct UnknownSkillError: Error, Equatable {
-    public let message: String
-    public init(_ message: String) { self.message = message }
+/// The model asked `cosmo_sdk_load_skill` for a name that is not in the
+/// skill set, or passed a non-string. Internal: a client-tool handler's
+/// throw is caught by the dispatch and delivered to the model as a tool
+/// error, so it never reaches a caller — Python and TypeScript raise an
+/// untyped error at the same point for the same reason.
+struct UnknownSkillError: RealtimeError, Equatable {
+    let message: String
+    init(_ message: String) { self.message = message }
 }
 
 /// Build the single `cosmo_sdk_load_skill` tool, or `nil` when there are no
 /// skills. Built as an `.sdkClient` so the reserved-namespace guard exempts it
 /// by construction — the tool the SDK ships is not the collision a caller tool
 /// taking the name would be.
-public func buildLoadSkillTool(_ skills: [Skill]) -> LoadSkillWiring? {
+func buildLoadSkillTool(_ skills: [Skill]) -> LoadSkillWiring? {
     if skills.isEmpty { return nil }
     let names = skills.map { $0.name }
     let byName = Dictionary(uniqueKeysWithValues: skills.map { ($0.name, $0) })

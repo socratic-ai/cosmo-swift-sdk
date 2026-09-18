@@ -12,9 +12,10 @@ struct SkillsResolveTests {
         #expect(try resolveSkills(skills) == skills)
     }
     @Test func duplicateNamesThrow() {
-        #expect(throws: SkillParseError.self) {
+        let error = #expect(throws: SkillError.self) {
             try resolveSkills(skills + [Skill(name: "faq", description: "dup", body: "d")])
         }
+        #expect(error?.code == .duplicateSkillName)
     }
     @Test func menuListsEverySkill() {
         let m = skillsMenuText(skills)

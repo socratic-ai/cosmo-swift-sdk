@@ -16,14 +16,14 @@ struct SessionAudioStreamTests {
 
     private func makeTransport() -> LiveKitSessionTransport {
         LiveKitSessionTransport(
-            options: RealtimeClient.Options(apiKey: "test-key")
+            client: RealtimeClient(apiKey: "test-key")
         )
     }
 
     @Test("startAudioStream without a connected room throws .notConnected")
     func startWithoutRoomThrows() async throws {
         let transport = makeTransport()
-        await #expect(throws: RealtimeSessionError.notConnected) {
+        await #expect(throws: SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.")) {
             try await transport.startAudioStream()
         }
         #expect(!transport._testAudioStreamLockHasValue(), "the guard must reject before claiming the slot")
@@ -34,7 +34,7 @@ struct SessionAudioStreamTests {
         let transport = makeTransport()
 
         try transport.claimAudioStreamSlot()
-        #expect(throws: RealtimeSessionError.audioPublishAlreadyActive) {
+        #expect(throws: SessionStateError(code: .audioPublishAlreadyActive, message: "An audio stream is already active on this session; remove it before starting another.")) {
             try transport.claimAudioStreamSlot()
         }
 
@@ -142,6 +142,84 @@ struct SessionAudioStreamContractTests {
         #expect(await !transport.audioStreamActive)
     }
 
+    @Test("a stop that overlaps start wins after the start handoff completes")
+    func overlappingStopWins() async throws {
+        let transport = FakeSessionTransport()
+        let session = RealtimeSession(transport: transport)
+        try await session._start(config: SessionConfig(), micMuted: true)
+        await transport.suspendAudioStreamStart()
+
+        let start = Task { try await session.startAudioStream() }
+        while !(await transport.audioStreamStartIsSuspended()) {
+            await Task.yield()
+        }
+        let stop = Task { await session.stopAudioStream() }
+        await Task.yield()
+
+        #expect(await transport.audioStreamActive)
+        await transport.resumeAudioStreamStart()
+        try await start.value
+        await stop.value
+
+        #expect(await !transport.audioStreamActive)
+        #expect(await transport.micEnabled == false)
+        let mutes = await transport.sent.map(observeSentFrame).filter { $0.type == "mute" }
+        #expect(mutes.compactMap { $0.fields["muted"] } == [.bool(false), .bool(true)])
+    }
+
+    @Test("a mute that overlaps stop is not undone by the stop's restore")
+    func overlappingMuteWins() async throws {
+        let transport = FakeSessionTransport()
+        let session = RealtimeSession(transport: transport)
+        try await session._start(config: SessionConfig(), micMuted: false)
+        try await session.startAudioStream()
+        await transport.suspendAudioStreamStop()
+
+        let stop = Task { await session.stopAudioStream() }
+        while !(await transport.audioStreamStopIsSuspended()) {
+            await Task.yield()
+        }
+        let mute = Task { try await session.setMuted(true) }
+        await Task.yield()
+
+        await transport.resumeAudioStreamStop()
+        await stop.value
+        try await mute.value
+
+        #expect(await transport.micEnabled == false)
+        let mutes = await transport.sent.map(observeSentFrame).filter { $0.type == "mute" }
+        #expect(mutes.compactMap { $0.fields["muted"] } == [.bool(false), .bool(false), .bool(true)],
+                "the explicit mute must land after the stop's restore, leaving the gate closed")
+    }
+
+    @Test("a reconnect mute re-assert waits for the operation in flight")
+    func reconnectReassertOrdersBehindQueue() async throws {
+        let transport = FakeSessionTransport()
+        let session = RealtimeSession(transport: transport)
+        try await session._start(config: SessionConfig(), micMuted: false)
+        try await session.setMuted(true)
+        await transport.suspendAudioStreamStart()
+
+        let start = Task { try await session.startAudioStream() }
+        while !(await transport.audioStreamStartIsSuspended()) {
+            await Task.yield()
+        }
+        await transport.simulateReconnect()
+        for _ in 0..<20 { await Task.yield() }
+        let early = await transport.sent.map(observeSentFrame).filter { $0.type == "mute" }
+        #expect(early.compactMap { $0.fields["muted"] } == [.bool(true)],
+                "the re-assert must wait for the start that holds the queue")
+
+        await transport.resumeAudioStreamStart()
+        try await start.value
+        while await transport.sent.map(observeSentFrame).filter({ $0.type == "mute" }).count < 3 {
+            await Task.yield()
+        }
+        let mutes = await transport.sent.map(observeSentFrame).filter { $0.type == "mute" }
+        #expect(mutes.compactMap { $0.fields["muted"] } == [.bool(true), .bool(false), .bool(false)],
+                "the re-assert reflects the mute state after the queued operation, not the stale reconnect-time capture")
+    }
+
     @Test("stopping a stream on a muted session leaves no live microphone")
     func stopRestoresMutedSession() async throws {
         // The stream publishes the local audio track to reach the wire. A
@@ -195,7 +273,7 @@ struct SessionAudioStreamContractTests {
         let transport = FakeSessionTransport()
         let session = RealtimeSession(transport: transport)
 
-        await #expect(throws: RealtimeSessionError.notConnected) {
+        await #expect(throws: SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.")) {
             try await session.startAudioStream()
         }
         #expect(await !transport.audioStreamActive)

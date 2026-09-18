@@ -2,10 +2,14 @@ import Foundation
 
 /// Head orientation in degrees, as a face-tracking backend reports it.
 public struct FacePose: Sendable, Equatable {
+    /// Tilt of the head toward a shoulder.
     public var rollDegrees: Double
+    /// Rotation of the head left or right.
     public var yawDegrees: Double
+    /// Tilt of the head up or down.
     public var pitchDegrees: Double
 
+    /// A head orientation from the three rotation angles.
     public init(rollDegrees: Double, yawDegrees: Double, pitchDegrees: Double) {
         self.rollDegrees = rollDegrees
         self.yawDegrees = yawDegrees
@@ -28,6 +32,7 @@ public struct FaceGeometry: Sendable, Equatable {
     /// (e.g. ARKit / TrueDepth); `nil` for backends that don't measure it.
     public var distanceMeters: Double?
 
+    /// A face snapshot from the parts a tracking backend reported.
     public init(
         contours: [String: [NormalizedPoint]] = [:],
         regions: [String: NormalizedBox] = [:],

@@ -17,7 +17,7 @@ struct AgentTests {
         let caller = AgentTool.client(
             name: "caller", description: "d", parameters: ["type": .string("object")], handler: { _ in [:] }
         )
-        let agent = try RealtimeAgent(mcp: McpRegistry(servers: [McpStdioServer(name: "fs", command: "x")]))
+        let agent = try RealtimeAgent(mcp: [McpStdioServer(name: "fs", command: "x")])
         let mcpFactory: MCPTransportFactory = { _ in
             FakeMCPTransport(responses: ["tools/list": #"{"tools":[{"name":"read","inputSchema":{"type":"object"}}]}"#])
         }
@@ -25,7 +25,7 @@ struct AgentTests {
         let session = try await agent.start(
             config: SessionConfig(tools: [caller]), transportFactory: mcpFactory
         ) { cfg in
-            capturedNames = (cfg.tools ?? []).compactMap { if case let .client(n, _, _, _) = $0 { return n }; return nil }
+            capturedNames = (cfg.tools ?? []).compactMap { if case let .client(n, _, _, _) = $0.payload { return n }; return nil }
             return try await self.fakeRealtime(cfg)
         }
         #expect(capturedNames == ["caller", "mcp__fs__read"])
@@ -37,7 +37,7 @@ struct AgentTests {
         let mcpFactory: MCPTransportFactory = { _ in
             let t = FakeMCPTransport(responses: ["tools/list": #"{"tools":[]}"#]); box.t = t; return t
         }
-        let agent = try RealtimeAgent(mcp: McpRegistry(servers: [McpStdioServer(name: "fs", command: "x")]))
+        let agent = try RealtimeAgent(mcp: [McpStdioServer(name: "fs", command: "x")])
         let session = try await agent.start(config: SessionConfig(), transportFactory: mcpFactory) { cfg in
             try await self.fakeRealtime(cfg)
         }
@@ -50,7 +50,7 @@ struct AgentTests {
         let mcpFactory: MCPTransportFactory = { _ in
             let t = FakeMCPTransport(responses: ["tools/list": #"{"tools":[]}"#]); box.t = t; return t
         }
-        let agent = try RealtimeAgent(mcp: McpRegistry(servers: [McpStdioServer(name: "fs", command: "x")]))
+        let agent = try RealtimeAgent(mcp: [McpStdioServer(name: "fs", command: "x")])
         _ = try await agent.start(config: SessionConfig(), transportFactory: mcpFactory) { cfg in
             let s = try await self.fakeRealtime(cfg)
             await s.end()
@@ -111,12 +111,16 @@ struct AgentTests {
     private func stubClient() -> RealtimeClient {
         makeStubClient(
             StubTransport { jsonResponse(.ok, "{}") },
-            options: .init(apiKey: "k", baseURL: URL(string: "https://api.example.com")!)
+            credential: .apiKey("k"),
+            baseURL: URL(string: "https://api.example.com")!
         )
     }
 
     private var callerTool: AgentTool {
-        .client(name: "caller", description: "d", parameters: ["type": .string("object")])
+        .client(
+            name: "caller", description: "d", parameters: ["type": .string("object")],
+            handler: { _ in [:] }
+        )
     }
 
     @Test func assemblesInlineAgentFieldsAndRunParams() async throws {
@@ -125,8 +129,7 @@ struct AgentTests {
         hooks.append(sessionStart { _ in SessionStartResult(additionalContext: "b") })
         let agent = try stubClient().agent(
             instructions: "You are terse.",
-            model: "gemini-live",
-            modelOptions: .gemini(temperature: 0.5),
+            model: .gemini(.init(modelId: "gemini-live", temperature: 0.5)),
             voice: VoiceConfig(name: "aoede"),
             audio: AudioConfig(output: false),
             tools: [callerTool],
@@ -147,8 +150,7 @@ struct AgentTests {
         #expect(config.agentName == nil)  // inline: no catalog handle
         #expect(config.agentInputs == nil)
         #expect(config.instructions == "You are terse.")
-        #expect(config.model == "gemini-live")
-        #expect(config.modelOptions == .gemini(temperature: 0.5))
+        #expect(config.model == .gemini(.init(modelId: "gemini-live", temperature: 0.5)))
         #expect(config.voice == VoiceConfig(name: "aoede"))
         #expect(config.audio == AudioConfig(output: false))
         #expect(config.tools == [callerTool])
@@ -168,8 +170,8 @@ struct AgentTests {
         #expect(config.storeVideo == false)
     }
 
-    @Test func assemblesCatalogAgentFieldsAndRunParams() {
-        let agent = stubClient().catalogAgent(
+    @Test func assemblesCatalogAgentFieldsAndRunParams() throws {
+        let agent = try stubClient().catalogAgent(
             "driver-pay", inputs: ["region": "west"], voice: VoiceConfig(name: "puck"),
             tools: [callerTool]
         )
@@ -187,7 +189,6 @@ struct AgentTests {
         // — so they must assemble unset rather than defaulted.
         #expect(config.instructions == nil)
         #expect(config.model == nil)
-        #expect(config.modelOptions == nil)
         #expect(config.audio == nil)
         #expect(config.interruptionSensitivity == nil)
         #expect(config.greeting == nil)
@@ -221,16 +222,17 @@ struct AgentTests {
         let agent = try stubClient().agent(
             tools: [
                 .client(
-                    name: AgentTool.sdkToolNamePrefix + "load_skill",
+                    name: AgentToolPayload.sdkToolNamePrefix + "load_skill",
                     description: "caller's own",
                     parameters: ["type": .string("object")]
+                , handler: { _ in [:] }
                 )
             ]
         )
         await #expect {
             _ = try await agent.start()
         } throws: { error in
-            guard let error = error as? RealtimeSessionError else { return false }
+            guard let error = error as? SessionStartError else { return false }
             return (error.errorDescription ?? "").contains("reserved")
         }
     }

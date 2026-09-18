@@ -10,7 +10,7 @@ import OpenAPIRuntime
 struct BearerAuthMiddleware: ClientMiddleware {
     static let sdkHeaderField = HTTPField.Name("x-cosmo-sdk")!
 
-    let credential: RealtimeClient.Options.Credential
+    let credential: RealtimeClient.Credential
 
     func intercept(
         _ request: HTTPRequest,
@@ -21,7 +21,7 @@ struct BearerAuthMiddleware: ClientMiddleware {
     ) async throws -> (HTTPResponse, HTTPBody?) {
         var req = request
         req.headerFields[.authorization] = "Bearer \(try await credential.bearerToken())"
-        req.headerFields[Self.sdkHeaderField] = RealtimeSession.sdkIdentityHeaderValue
+        req.headerFields[Self.sdkHeaderField] = sdkIdentityHeaderValue
         return try await next(req, body, baseURL)
     }
 }

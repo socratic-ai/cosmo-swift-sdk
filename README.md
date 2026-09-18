@@ -28,7 +28,7 @@ it; file issues on cosmo-ai.
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/socratic-ai/cosmo-swift-sdk", from: "0.7.0"),
+    .package(url: "https://github.com/socratic-ai/cosmo-swift-sdk", from: "0.8.0"),
 ],
 targets: [
     .target(
@@ -51,21 +51,32 @@ The `from:` range accepts every release below 1.0, and the
 release — if a documented API is missing in your build, run
 `swift package update` first.
 
-## Teach your agent
+On **0.7.0 and earlier**, the first Xcode build fails with `Validate plug-in
+"OpenAPIGenerator" … must be enabled before it can be used`: those versions
+generate their API client during the build, and Xcode will not run a package
+build plugin until you trust it. Click **Trust & Enable**, or find it under
+**File → Packages → Trust & Enable Plugins**. Where nothing can answer the
+prompt — Xcode Cloud, or any headless runner — pass
+`-skipPackagePluginValidation` to `xcodebuild`. Later versions ship the
+generated client already built, so there is no plugin and no prompt.
 
-One [Agent Skill](https://agentskills.io) covers the whole Cosmo SDK
-family (TypeScript, Python, Swift): the current SDK API, the credential
-and login rules, and the production token flow. It teaches coding agents
-(Claude Code, Cursor, Codex CLI, Gemini CLI, …) — install it once per
-machine or project:
+## Teach your agent first
+
+If a coding agent is writing this code, install the Agent Skill before the
+quickstart:
 
 ```bash
 npx skills add socratic-ai/cosmo-ai
 ```
 
+One [Agent Skill](https://agentskills.io) covers the whole Cosmo SDK family
+(TypeScript, Python, Swift): the current SDK API, the credential and login
+rules, and the production token flow. It works with Claude Code, Cursor,
+Codex CLI, Gemini CLI, and anything else that reads the skills format.
+
 Agents can also read the docs directly:
-https://platform.askcosmo.ai/docs (`/llms.txt`, `/llms-full.txt`, and an
-MCP endpoint at `/docs/api/mcp`).
+https://platform.askcosmo.ai/docs (`/docs/llms.txt`, `/docs/llms-full.txt`, and
+an MCP endpoint at `/docs/api/mcp`).
 
 ## Quickstart
 
@@ -80,14 +91,14 @@ struct WeatherArgs: Decodable, Sendable {
     let city: String
 }
 
-let client = RealtimeClient(.init(apiKey: "cosmo_your_api_key"))
+let client = RealtimeClient(apiKey: "cosmo_your_api_key")
 
 let agent = try client.agent(
     instructions: "You are a terse assistant.",
     tools: [
         // Client tool: the agent runs it over the transport and the
         // returned object is reported back as the result.
-        try AgentTool.define(
+        try AgentTool.clientTool(
             name: "get_weather",
             description: "Current weather for a city.",
             input: .object(
@@ -97,7 +108,7 @@ let agent = try client.agent(
         ) { (args: WeatherArgs) in
             ["temp": .double(21.5), "city": .string(args.city)]
         },
-        .webSearch,
+        .webSearchTool(),
     ],
     greeting: "Hi — what can I do for you?"
 )
@@ -110,7 +121,10 @@ for try await event in session.events {
         print("live — session:", ready.sessionId)
         try await session.send(text: "Hello!")
     case .transcript(let delta):
-        print(delta.text)
+        // A console is append-only: print each completed turn once, off
+        // the raw delta stream. A UI renders the session-owned
+        // ``session.transcript`` wholesale instead.
+        if delta.isFinal && !delta.text.isEmpty { print("[\(delta.role)] \(delta.text)") }
     case .toolInvocation(let invocation):
         // Observability: the agent invoked a client tool. Execution +
         // reply happen via the tool's handler over RPC — nothing to send
@@ -140,33 +154,33 @@ needs its own purpose string. See
 
 ## API
 
-### `RealtimeClient.Options`
+### `RealtimeClient`
 
-Client-level settings; pass once when you construct the client.
+Client-level settings are the initializer's parameters; there are four
+initializers, one per credential form, sharing these trailing parameters:
 
-| Property | Type | Default |
+| Parameter | Type | Default |
 |---|---|---|
-| `credential` | `Credential` | required |
-| `baseURL` | `URL` | read-only; `COSMO_BASE_URL`, else `https://platform.askcosmo.ai` |
+| `baseURL` | `URL?` | resolved |
 | `connectTimeout` | `TimeInterval` | `30` |
 | `requestTimeout` | `TimeInterval` | `45` |
 | `verifyTLS` | `VerifyTLS` | `.auto` |
+| `transport` | `RealtimeClient.Transport` | `.webrtc` (`.livekit` is a deprecated alias) |
 
-`Credential` has three forms, and which one you use is a deployment decision:
+Which credential you use is a deployment decision:
 
 ```swift
 // Workspace-scoped key. Server-side only — it opens sessions AND mints
-// end-user tokens (minting ships in the opt-in CosmoRealtimeMint product:
-// `import CosmoRealtimeMint`). Never embed it in a distributed app.
-RealtimeClient.Options(apiKey: "cosmo_…")
+// end-user tokens. Never embed it in a distributed app.
+RealtimeClient(apiKey: "cosmo_…")
 
 // A minted per-user JWT, scoped to one external user. Safe to ship in a
 // device or browser: it opens sessions but cannot mint.
-RealtimeClient.Options(token: jwt)
+RealtimeClient(token: jwt)
 
 // A TokenSource: the SDK fetches the JWT from your minting endpoint,
 // caches it, and re-fetches as expiry nears — no refresh code in the app.
-RealtimeClient.Options(tokenSource: try .endpoint(
+RealtimeClient(tokenSource: try .endpoint(
     URL(string: "https://your-backend.example.com/token")!,
     headers: ["Authorization": "Bearer \(appSession)"]
 ))
@@ -179,10 +193,9 @@ RealtimeClient.Options(tokenSource: try .endpoint(
 try RealtimeClient()
 ```
 
-`baseURL` is not an argument. It resolves from `COSMO_BASE_URL` — the same
-variable the Python and TypeScript SDKs read — falling back to
-`https://platform.askcosmo.ai`, and is exposed read-only so you can log which
-backend a session will use. Set it explicitly if your key's workspace does not
+Left unset, `baseURL` resolves from `COSMO_BASE_URL` — the same variable the
+Python and TypeScript SDKs read — falling back to
+`https://platform.askcosmo.ai`. Set it explicitly if your key's workspace does not
 live on `platform.askcosmo.ai`: Cosmo also serves `https://assistant.askcosmo.ai`,
 a separate member-facing surface with its own workspaces, and a key minted on
 one surface fails as a `401` on the other.
@@ -195,6 +208,21 @@ One process, one backend.
 hosts so a self-signed local-dev backend works; remote hosts are always
 verified.
 
+For the one-process local OSS server on macOS, select the WebSocket carrier:
+
+```swift
+let client = RealtimeClient(
+    apiKey: "local-development",
+    baseURL: URL(string: "http://localhost:8080")!,
+    transport: .websocket
+)
+```
+
+It carries PCM audio, session events and ordinary client-tool RPC on one
+socket, using the same `AVAudioPCMBuffer` and event APIs. It has no
+reconnection, camera, screen share, byte streams, background client tools,
+dial or usage reads. Other Apple platforms reject `.websocket` at start.
+
 ### Agents
 
 `client.agent(...)` builds an inline persona — what the agent *is*,
@@ -205,16 +233,26 @@ skill names, when the agent is built rather than mid-call.
 | Parameter | Meaning |
 |---|---|
 | `instructions` | System instructions |
-| `model` | Provider/model selection |
-| `modelOptions` | Provider-scoped model knobs, discriminated on provider (`.gemini`, `.openai`, `.openaiMini`, `.grok`) so an illegal pairing is unrepresentable |
+| `model` | What runs on the other end: `.id("…")` for a model id or provider alias, or a provider case (`.gemini`, `.openai`, `.openaiMini`, `.grok`) carrying that provider's knobs and an optional `modelId:`, so a model that disagrees with its knobs is unrepresentable |
 | `voice` | How the agent sounds: `VoiceConfig(name:speakingStyle:)` — prebuilt voice id plus delivery guidance |
-| `audio` | The audio pipeline: `AudioConfig(output:noiseCancellation:ambience:)` — ambience present = enabled |
-| `tools` | Client-executed specs this app fulfills, and typed zero-config server-tool opt-ins (`.webSearch`, `.examineImage`, `.detectObjects`, `.pointAtObject`) |
+| `audio` | The audio pipeline: `AudioConfig(output:noiseCancellation:)`. `noiseCancellation` is off by default; `.voiceFocus` removes background voices but keeps only the primary speaker, and `.denoise` strips noise while keeping every voice (the mode for a shared microphone). A phone leg gets a lighter noise suppressor whatever the mode, and does not single out competing voices |
+| `tools` | Client-executed specs this app fulfills, and typed zero-config server-tool opt-ins (`.webSearchTool()`, `.examineImageTool()`, `.detectObjectsTool()`, `.pointAtObjectTool()`) |
 | `interruptionSensitivity` | How readily the user's speech interrupts the agent (`.default` / `.low` / `.high`) |
 | `greeting` | Opening line the assistant speaks first, voiced server-side as soon as the model session opens — before the client even receives `ready` |
 | `skills` | Agent Skills folded into the persona — see [Skills](#skills) |
 | `mcp` | MCP servers whose tools join the set at start — see [MCP servers](#mcp-servers-local-stdio) |
 | `hooks` | Lifecycle observers and policy gates — see [Hooks](#hooks) |
+
+There is no `language:` parameter here or anywhere else in the SDK: the
+native-audio models these sessions run on pick their working language from
+the audio itself, and no provider setting pins it. Write the rule into
+`instructions` — managed sessions compose default language-stability
+guidance that defers to instruction-level rules, so a pinned agent keeps
+its pin. Steering, not a guarantee: drift shows first as wrong-language
+transcript lines, confirmed when the agent's own replies follow — a
+wrong-language user line alone can be the separate speech-to-text model
+the OpenAI-family and Grok providers use for user transcripts, which
+instructions never reach.
 
 `client.catalogAgent(name, inputs:voice:tools:mcp:hooks:)` runs a workspace
 catalog agent by handle instead. The stored config runs verbatim, so only
@@ -237,7 +275,7 @@ between two runs of the same persona, and all are optional:
 
 ### Tools
 
-`AgentTool.define` is the tool API to reach for: you write a
+`clientTool` is the tool API to reach for: you write a
 `ToolSchema` and a `Decodable` args struct, and the SDK validates the
 declaration at construction and decodes the arguments for you.
 
@@ -247,7 +285,7 @@ struct BookArgs: Decodable, Sendable {
     let partySize: Int
 }
 
-let bookTable = try AgentTool.define(
+let bookTable = try AgentTool.clientTool(
     name: "book_table",
     description: "Reserve a table.",
     input: .object(
@@ -267,11 +305,11 @@ pin the pair with `ToolSchemaConsistencyCheck` in your unit tests. A schema
 `default` is model guidance only: an omitted field decodes as `nil`, so fall
 back in code (`args.unit ?? .c`).
 
-`defineBackground` is the same declaration and decoding for a long-running
+`backgroundClientTool` is the same declaration and decoding for a long-running
 tool: the handler drives a `ClientToolJob` (`ack` / `complete` / `fail`) so the
 agent can keep talking while the work runs.
 
-`.client(name:description:parameters:handler:)` is the untyped escape hatch —
+`.clientTool(name:description:parameters:handler:)` is the untyped escape hatch —
 a hand-built JSON schema and a raw `[String: JSONValue]` handler. Use it only
 when the schema is computed at runtime. A spec without a handler is still
 declared to the agent but only surfaces its invocation as a `.toolInvocation`
@@ -282,7 +320,7 @@ Handlers are local-only — never serialized, never on the wire.
 ### Event stream
 
 `session.events` is a single-consumer `AsyncThrowingStream` of
-`RealtimeSession.Event` — one case per server event (`ready`, `transcript`,
+`RealtimeSessionEvent` — one case per server event (`ready`, `transcript`,
 `modelText`, `turnComplete`, speech/LLM/TTS phases, the tool lifecycle,
 `reconnecting`, `error`, `pong`) plus:
 
@@ -294,7 +332,8 @@ Handlers are local-only — never serialized, never on the wire.
   publishes a best-effort `session-ended` wire frame before a deliberate
   teardown; the SDK latches its reason onto the sentinel rather than
   surfacing the frame mid-stream. Start failures throw from `agent.start(...)`
-  instead (for example, `RealtimeSessionError.versionMismatch`).
+  instead, as a `SessionStartError` whose `code` names the failure (for
+  example, `.versionMismatch`).
 
 Oversized server messages arrive chunked (`server-envelope-chunk`) and are
 reassembled transparently before they surface as events.
@@ -303,36 +342,42 @@ reassembled transparently before they surface as events.
 `connecting`, `connected`, `reconnecting`/`reconnected`,
 `disconnected(reason:)`).
 
-#### Transcripts append, then replace
+#### The transcript is session-owned
 
-`.transcript` carries two different things depending on `isFinal`, and
-rendering them the same way duplicates every turn:
-
-- **`isFinal == false`** — `text` is the **new fragment since the previous
-  event** for that role's turn. Append it.
-- **`isFinal == true`** — `text` is the **cumulative full transcript** for the
-  turn. Replace whatever you accumulated.
+The session folds `.transcript` deltas into coalesced turns for you.
+`session.transcript` is the conversation so far — one `TranscriptItem` per
+turn (`id`, `role`, `text`, `isFinal`) — and a `.transcriptUpdated` event
+carrying the complete updated list is yielded on `session.events` after
+every change, like Python's session iterator:
 
 ```swift
-var current = ""
 for try await event in session.events {
-    guard case .transcript(let delta) = event else { continue }
-    current = delta.isFinal ? delta.text : current + delta.text
-    render(current)
+    if case .transcriptUpdated(let update) = event {
+        render(update.items)   // one bubble per item — that's the whole algorithm
+    }
 }
 ```
 
-`isFinal == true` means "this turn's transcription is complete", not "the
-assistant turn is over" — audio can still be playing out. `.turnComplete`
-signals the turn boundary.
+`TranscriptItem` is `Identifiable`, so SwiftUI renders it directly:
 
-That reduction is correct for the common path. Two cases need more:
+```swift
+List(items) { item in
+    Text("[\(item.role)] \(item.text)")
+}
+```
 
-- **An empty final closes the turn.** It means an empty turn, not "unchanged" —
-  skip it and the turn's bubble dangles into the next one.
-- **On a text-only session** (`audio: AudioConfig(output: false)`) a user final that
-  arrives after the endpointer already committed an utterance carries only the
-  remainder, so replacing on it drops the committed prefix.
+An item with `isFinal == false` is still in progress: its text may grow, be
+replaced by the closing final (transcription can correct earlier words), or
+the item may be removed (a retracted turn). Once `isFinal == true` it never
+changes again — and `session.transcript` survives `end()`, so the full
+conversation stays readable after the run.
+
+The raw `.transcript` deltas stay on `session.events` for pipelines that
+want the firehose: a non-final `text` is the new fragment since the previous
+event for that role's turn, and the final carries the turn's cumulative
+text, superseding the accumulation. `isFinal == true` means "this turn's
+transcription is complete", not "the assistant turn is over" — audio can
+still be playing out; `.turnComplete` signals the turn boundary.
 
 ### Sends
 
@@ -343,6 +388,10 @@ try await session.ping()
 await session.end()             // graceful: wire end frame, then teardown
 await session.waitUntilEnded()  // returns once the session is over
 ```
+
+Sent text lands in `session.transcript` as its own closed user turn (an
+in-progress speech transcription is untouched); pass
+`send(text:, transcript: false)` to keep it out.
 
 Client tools aren't sent here — declare a handler on the tool spec and the
 SDK runs it over the transport when the agent invokes it.
@@ -366,8 +415,10 @@ drain the stream from another task and await this one on the main path.
 
 ### Readiness vs liveness
 
-`.ready` is the authoritative signal and the only one that carries the session
-id, the rejected-tool list, and the effective duration cap. Gate on it.
+`start` already returns at ready, so there is nothing to gate on: a session you
+hold is usable. `.ready` still arrives on `events`, and it remains the only
+signal carrying the session id, the rejected-tool list, and the effective
+duration cap — read it for those, not to decide when to begin.
 
 `await session.waitUntilAgentLive()` is a separate, weaker signal: it returns
 once the agent participant publishes a track, which is LiveKit's transport-level
@@ -441,7 +492,7 @@ and receives the body as private, never-spoken instructions for the rest of the
 call.
 
 ```swift
-let client = RealtimeClient(.init(token: jwt))
+let client = RealtimeClient(token: jwt)
 let skills = [try parseSkillMd(refundsMarkdown, defaultName: "refunds")]
 let agent = try client.agent(
     instructions: "You are a terse support agent.",
@@ -470,35 +521,67 @@ namespaced `mcp__<server>__<tool>` and ride in the session's tool set as ordinar
 client tools.
 
 ```swift
-let client = RealtimeClient(.init(token: jwt))
-let registry = try McpRegistry.fromConfigFile(url)
-let agent = try client.agent(mcp: registry)
+let client = RealtimeClient(token: jwt)
+let agent = try client.agent(mcp: .configFile(url))
 let session = try await agent.start()
 // drive session.events … ; then:
 await session.end()
 ```
 
+`.configFile(_:)` reads one `.mcp.json`; inline servers are ordinary array
+elements, and the two compose:
+
+```swift
+let agent = try client.agent(mcp: [
+    McpStdioServer(name: "fs", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"])
+])
+let agent = try client.agent(mcp: .configFile(url) + [inlineServer])
+```
+
+A path that is not a file, a malformed document, and duplicate server names
+throw `McpError` when the agent is built, not mid-call; a connection or tool
+failure throws the same type mid-call. `code` names which failure it was —
+match on it rather than on the message:
+
+```swift
+do {
+    let agent = try client.agent(mcp: .configFile(url))
+} catch let error as McpError where error.code == .missingCommand {
+    // …
+}
+```
+
+The codes are `not_a_file`, `cannot_read`, `invalid_json`, `missing_servers`,
+`invalid_server_entry`, `missing_command`, `invalid_args`, `invalid_env`,
+`invalid_cwd`, `duplicate_server_name`, `connection_failed`,
+`invalid_response`, `server_error` and `tool_error`.
+
+A server that fails to launch, initialize, or list its tools is skipped with a
+warning rather than thrown — the session starts without its tools, so one bad
+entry in a shared config doesn't take the call down. Failures reach you once a
+server is connected.
+
 v1 supports **stdio** servers (macOS — subprocess); remote (`url`) entries in
-`.mcp.json` are skipped with a warning. A `StdioServer` runs an arbitrary local
+`.mcp.json` are skipped with a warning. An `McpStdioServer` runs an arbitrary local
 command — trust your config. No third-party dependency is added.
 
 `HelloRealtime/Sources/MCPExample` in the examples repo is a runnable version.
 
 ## Authentication
 
-Workspace-scoped API key with `realtime:use` scope, passed as:
+Workspace-scoped API key with the `realtime:start` scope, passed as:
 
 ```
 Authorization: Bearer cosmo_<key>
 ```
 
-The key is injected automatically via `RealtimeClient.Options(apiKey:)`. For
+The key is injected automatically via `RealtimeClient(apiKey:)`. For
 anything you distribute, mint a per-user token instead and construct with
-`RealtimeClient.Options(token:)`.
+`RealtimeClient(token:)`.
 
 `client.verify()` checks the credential without starting a
 session — free, no room, no agent. It returns the workspace it's bound to, its
-scopes, whether it carries `realtime:use` (`canStartSessions`), and whether the
+scopes, whether it carries `realtime:start` (`canStartSessions`), and whether the
 deployment has the default voice stack configured (`realtimeVoiceAvailable`).
 `workspace` is nil
 for a minted token — it runs on an end user's device, which isn't told whose
@@ -527,11 +610,37 @@ RealtimeClient (struct)                  — credential, endpoints, agent factor
                      └── Room (LiveKit)             — WebRTC audio + data channel
 ```
 
-Generated wire types live in the internal `CosmoRealtimeAPI` module
-(regenerated on every build from the OpenAPI spec at
-`Sources/CosmoRealtimeAPI/openapi.json`) and are re-exposed under clean names
-(`RealtimeSession.Ready`, `RealtimeSession.TranscriptDelta`, …) so consumers
-only ever `import CosmoRealtime`.
+`CosmoRealtime` declares every wire type it publishes, under the cross-SDK
+names (`ReadyEvent`, `TranscriptDeltaEvent`, …), so `import CosmoRealtime`
+is the only import a consumer needs. The internal `CosmoRealtimeAPI` module
+holds the client generated from the OpenAPI spec at
+`Sources/CosmoRealtimeAPI/openapi.json`; it is not a product and nothing
+public points into it.
+
+## Logging
+
+The SDK logs through `os_log` under the `socratic.cosmo-realtime` subsystem,
+so one predicate captures a whole session:
+
+```bash
+log stream --predicate 'subsystem == "socratic.cosmo-realtime"' --info --debug
+```
+
+That predicate is the way to read a session in full. `os_log` levels are set
+outside the process, though, so a command-line run gets a second, narrower
+sink: set `COSMO_LOG_LEVEL` to `silent`, `error`, `warn`, `info`, or `debug`
+and the SDK writes its traced lines to standard error at that level.
+
+```bash
+COSMO_LOG_LEVEL=debug swift run
+```
+
+Today that means one line per session with the connect-latency breakdown.
+Unlike the Python and TypeScript SDKs, where the same variable turns the
+whole SDK verbose, everything else here stays on `os_log`.
+
+For LiveKit's own internals, set `COSMO_REALTIME_LIVEKIT_LOG` and capture the
+`io.livekit.sdk` subsystem alongside ours.
 
 ## Example
 

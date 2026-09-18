@@ -32,7 +32,7 @@ struct MCPProcessTransportTests {
         let server = McpStdioServer(name: "echo", command: "/bin/sh", args: ["-c", "while IFS= read -r line; do :; done"])
         let transport = try MCPProcessTransport(server: server)
         await transport.close()
-        await #expect(throws: MCPError.self) {
+        await #expect(throws: McpError.self) {
             _ = try await transport.request(method: "tools/list", paramsJSON: "{}")
         }
     }
@@ -76,7 +76,7 @@ struct MCPProcessTransportTests {
     @Test func requestTimesOutWhenServerNeverReplies() async throws {
         let server = McpStdioServer(name: "silent", command: "/bin/sh", args: ["-c", "while IFS= read -r line; do :; done"])
         let transport = try MCPProcessTransport(server: server, requestTimeout: 0.2)
-        await #expect(throws: MCPError.self) {
+        await #expect(throws: McpError.self) {
             _ = try await transport.request(method: "tools/list", paramsJSON: "{}")
         }
         await transport.close()
@@ -85,7 +85,7 @@ struct MCPProcessTransportTests {
     @Test func stdoutBufferOverflowFailsPendingRequests() async throws {
         let server = McpStdioServer(name: "flood", command: "/bin/sh", args: ["-c", "yes x | tr -d '\n'"])
         let transport = try MCPProcessTransport(server: server, maxLineBufferBytes: 1024)
-        await #expect(throws: MCPError.self) {
+        await #expect(throws: McpError.self) {
             _ = try await transport.request(method: "tools/list", paramsJSON: "{}")
         }
         await transport.close()

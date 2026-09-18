@@ -1,10 +1,10 @@
 import Foundation
 
-/// A configured agent, created by ``RealtimeClient/agent(instructions:model:modelOptions:voice:audio:tools:interruptionSensitivity:greeting:skills:mcp:hooks:)``
+/// A configured agent, created by ``RealtimeClient/agent(instructions:model:voice:audio:tools:interruptionSensitivity:greeting:skills:mcp:hooks:)``
 /// or ``RealtimeClient/catalogAgent(_:inputs:voice:tools:mcp:hooks:)``: the
 /// persona — what the agent is, independent of any one run. Reused
 /// unchanged across sessions;
-/// ``start(resumeSessionId:maxSessionSeconds:storeRecording:storeAudio:storeTranscript:storeVideo:micMuted:rpcHandlers:)``
+/// ``start(resumeSessionId:maxSessionSeconds:storeRecording:storeAudio:storeTranscript:storeVideo:micMuted:rpcHandlers:onStateChange:)``
 /// opens one run with its per-run params.
 public struct RealtimeAgent: Sendable {
     /// The creating client — credentials, endpoints, timeouts. ``nil`` only
@@ -18,14 +18,14 @@ public struct RealtimeAgent: Sendable {
     public let inputs: [String: String]?
     /// System instructions. Replaces the server's neutral default when set.
     public let instructions: String?
-    /// Provider/model selection. ``nil`` lets the server choose its default.
-    public let model: String?
-    /// Provider-scoped model knobs, discriminated on provider.
-    public let modelOptions: ModelOptions?
+    /// What runs on the other end: a family alias or concrete model id
+    /// (``RealtimeModel/id(_:)``), or a provider case carrying that provider's knobs.
+    /// ``nil`` lets the server choose its default.
+    public let model: RealtimeModel?
     /// How the agent sounds — prebuilt voice id and speaking style.
     public let voice: VoiceConfig?
-    /// The agent's audio pipeline — output emission, inbound noise
-    /// cancellation, and the ambience bed.
+    /// The agent's audio pipeline — output emission and inbound noise
+    /// cancellation.
     public let audio: AudioConfig?
     /// Tool set for the agent's sessions: client-executed specs plus opt-in
     /// server tools.
@@ -36,10 +36,10 @@ public struct RealtimeAgent: Sendable {
     public let greeting: String?
     /// Skills folded into the persona: the menu rides resident in the
     /// instructions and the load tool joins the tool set at start.
-    public let skills: [Skill]
+    public let skills: [Skill]?
     /// MCP servers whose tools join the set at start; the session owns the
     /// connections from there on.
-    public let mcp: McpRegistry?
+    public let mcp: [McpStdioServer]?
     /// Client hooks (in-process seam callbacks) and declarative server hooks.
     public let hooks: [Hook]?
 
@@ -48,15 +48,14 @@ public struct RealtimeAgent: Sendable {
         name: String? = nil,
         inputs: [String: String]? = nil,
         instructions: String? = nil,
-        model: String? = nil,
-        modelOptions: ModelOptions? = nil,
+        model: RealtimeModel? = nil,
         voice: VoiceConfig? = nil,
         audio: AudioConfig? = nil,
         tools: [AgentTool] = [],
         interruptionSensitivity: InterruptionSensitivity? = nil,
         greeting: String? = nil,
-        skills: [Skill] = [],
-        mcp: McpRegistry? = nil,
+        skills: [Skill]? = nil,
+        mcp: [McpStdioServer]? = nil,
         hooks: [Hook]? = nil
     ) {
         self.client = client
@@ -64,7 +63,6 @@ public struct RealtimeAgent: Sendable {
         self.inputs = inputs
         self.instructions = instructions
         self.model = model
-        self.modelOptions = modelOptions
         self.voice = voice
         self.audio = audio
         self.tools = tools
@@ -81,21 +79,28 @@ public struct RealtimeAgent: Sendable {
     /// mid-call.
     init(
         tools: [AgentTool] = [],
-        skills: [Skill] = [],
-        mcp: McpRegistry? = nil,
+        skills: [Skill]? = nil,
+        mcp: [McpStdioServer]? = nil,
         hooks: [Hook]? = nil
     ) throws {
         self.init(
             client: nil,
             tools: tools,
-            skills: try resolveSkills(skills),
-            mcp: mcp,
+            skills: try skills.map(resolveSkills),
+            mcp: try mcp.map(resolveMcpServers),
             hooks: hooks
         )
     }
 
     /// Open one session from this agent: the agent's config plus this run's
-    /// params. The session owns any MCP connections from here on: ending it
+    /// params. Returns once the session is ready — the server's handshake has
+    /// landed, so every method on the returned session works immediately.
+    /// Throws on any failure to get there: a room that closes before ready
+    /// throws ``SessionStartError``, a
+    /// handshake that never arrives throws
+    /// ``SessionStartError``, and cancelling the
+    /// calling task tears the session down and throws `CancellationError`.
+    /// The session owns any MCP connections from here on: ending it
     /// tears them down too.
     /// - Parameter micMuted: when `true`, the session joins WITHOUT
     ///   publishing the microphone — nothing is captured or sent until the
@@ -115,7 +120,8 @@ public struct RealtimeAgent: Sendable {
         storeTranscript: Bool? = nil,
         storeVideo: Bool? = nil,
         micMuted: Bool = false,
-        rpcHandlers: [String: ClientToolHandler] = [:]
+        rpcHandlers: [String: ClientToolHandler] = [:],
+        onStateChange: (@Sendable (SessionState) -> Void)? = nil
     ) async throws -> RealtimeSession {
         guard let client else {
             preconditionFailure(
@@ -135,13 +141,17 @@ public struct RealtimeAgent: Sendable {
             transportFactory: defaultMCPTransportFactory
         ) { cfg in
             try await RealtimeSession.start(
-                client.options, config: cfg, micMuted: micMuted, rpcHandlers: rpcHandlers
+                client,
+                config: cfg,
+                micMuted: micMuted,
+                rpcHandlers: rpcHandlers,
+                onStateChange: onStateChange
             )
         }
     }
 
     /// The agent's fields plus one run's params, assembled into the wire
-    /// config ``start(resumeSessionId:maxSessionSeconds:storeRecording:storeAudio:storeTranscript:storeVideo:micMuted:rpcHandlers:)``
+    /// config ``start(resumeSessionId:maxSessionSeconds:storeRecording:storeAudio:storeTranscript:storeVideo:micMuted:rpcHandlers:onStateChange:)``
     /// sends.
     func _sessionConfig(
         resumeSessionId: String? = nil,
@@ -155,7 +165,6 @@ public struct RealtimeAgent: Sendable {
             agentName: name,
             agentInputs: inputs,
             model: model,
-            modelOptions: modelOptions,
             voice: voice,
             audio: audio,
             instructions: instructions,
@@ -183,7 +192,7 @@ public struct RealtimeAgent: Sendable {
         var cfg = config
 
         var skillTools: [AgentTool] = []
-        if let wiring = buildLoadSkillTool(skills) {
+        if let wiring = buildLoadSkillTool(skills ?? []) {
             skillTools = [wiring.tool]
             if !wiring.menu.isEmpty {
                 if let existing = cfg.instructions, !existing.isEmpty {
@@ -200,13 +209,18 @@ public struct RealtimeAgent: Sendable {
         // First occurrence wins, in order: agent tools → cosmo_sdk_load_skill
         // → MCP.
         let assembled = cfg.tools ?? []
-        let reserved = Set((assembled + skillTools).map(\.name))
-        let connected = try await mcp?.connect(reservedNames: reserved, transportFactory: transportFactory)
+        let reserved = Set((assembled + skillTools).map(\.payload.name))
+        let connected: ConnectedMcp?
+        if let mcp {
+            connected = await connectMcp(mcp, reservedNames: reserved, transportFactory: transportFactory)
+        } else {
+            connected = nil
+        }
         do {
             let mcpTools: [AgentTool]
-            if let connected { mcpTools = await connected.tools } else { mcpTools = [] }
-            var seen = Set(assembled.map(\.name))
-            let added = (skillTools + mcpTools).filter { seen.insert($0.name).inserted }
+            if let connected { mcpTools = connected.tools } else { mcpTools = [] }
+            var seen = Set(assembled.map(\.payload.name))
+            let added = (skillTools + mcpTools).filter { seen.insert($0.payload.name).inserted }
             if !added.isEmpty || cfg.tools != nil {
                 cfg.tools = assembled + added
             }

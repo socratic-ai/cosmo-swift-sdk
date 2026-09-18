@@ -2,15 +2,15 @@ import Foundation
 import Testing
 @testable import CosmoRealtime
 
-/// The advertise-vs-register matrix for client tools. A tool can be:
-///   - advertised AND RPC-handled (a normal ``AgentTool.client`` with a handler),
-///   - advertised but NOT handled (server-orchestrated, e.g. ``mouse_click`` → handler nil),
+/// The advertise-vs-register matrix for client tools. A tool is either:
+///   - advertised AND RPC-handled (an ``AgentTool.client``, which carries its handler), or
 ///   - RPC-handled but NOT advertised (the grounding RPCs — passed via ``rpcHandlers``).
 ///
-/// The third case is the one a naive "handlers = declared tools" mapping silently drops,
+/// The second is the one a naive "handlers = declared tools" mapping silently drops,
 /// breaking the server-orchestrated grounding flow on-device. These tests pin that the
 /// register-only ``rpcHandlers`` path reaches the transport's RPC registration while staying
-/// off the advertised wire config.
+/// off the advertised wire config. Advertised-but-unhandled is not a third case: a client
+/// tool carries its handler, so it cannot be declared without one.
 @Suite("Client-tool registration")
 struct ClientToolRegistrationTests {
 
@@ -25,11 +25,8 @@ struct ClientToolRegistrationTests {
                 .client(name: "handled_tool", description: "runs locally",
                         parameters: ["type": .string("object")],
                         handler: { _ in [:] }),
-                // advertised but NOT self-handled (server-orchestrated)
-                .client(name: "mouse_click", description: "server-orchestrated",
-                        parameters: ["type": .string("object")], handler: nil),
                 // advertised server tool (typed opt-in)
-                .webSearch,
+                .webSearchTool(),
             ]
         )
         try await session._start(
@@ -41,8 +38,8 @@ struct ClientToolRegistrationTests {
             ]
         )
 
-        // Registered = handler-bearing client tools ∪ rpcHandlers. `mouse_click`
-        // (handler nil) and the server tool register nothing.
+        // Registered = client tools ∪ rpcHandlers. The typed server opt-in
+        // registers nothing — the server runs it.
         let registered = await transport.registeredToolHandlers
         #expect(Set(registered.keys) == ["handled_tool", "grounding_capture", "grounding_click"])
 
@@ -52,8 +49,55 @@ struct ClientToolRegistrationTests {
         let advertised = Self.advertisedToolNames(frame)
         // Name-bearing specs are the client tools; the typed server opt-in
         // carries only its kind (zero-config), so it has no name to advertise.
-        #expect(advertised == ["handled_tool", "mouse_click"])
+        #expect(advertised == ["handled_tool"])
         #expect(Self.advertisedToolKinds(frame).contains("web_search"))
+    }
+
+    @Test("wire plumbing is hook-exempt: the capture RPC and rpcHandlers, never client tools")
+    func hookExemptionCoversPlumbingOnly() async throws {
+        let transport = FakeSessionTransport()
+        let session = RealtimeSession(transport: transport)
+        let config = SessionConfig(
+            tools: [
+                .client(name: "handled_tool", description: "runs locally",
+                        parameters: ["type": .string("object")],
+                        handler: { _ in [:] }),
+                .screenLocateTool { _ in ScreenCapture(imageJPEG: Data([0xff, 0xd8])) },
+            ]
+        )
+        try await session._start(
+            config: config,
+            rpcHandlers: [
+                "grounding_capture": { _ in [:] },
+                // A caller override of an advertised tool name: the model can
+                // still invoke it, so it must keep hooks.
+                "handled_tool": { _ in [:] },
+            ]
+        )
+
+        // Hooks fire for tool calls; the capture RPC and register-only RPC
+        // methods are wire plumbing, not tools — but an advertised name is
+        // never exempt, whoever supplied its handler.
+        let exempt = await transport.registeredHookExemptMethods
+        #expect(exempt == ["screen_capture", "grounding_capture"])
+    }
+
+    @Test("screen_locate on a transport without byte streams refuses at start")
+    func screenLocateRefusesWithoutByteStreams() async throws {
+        let transport = FakeSessionTransport(supportsByteStreams: false)
+        let session = RealtimeSession(transport: transport)
+        let config = SessionConfig(
+            tools: [.screenLocateTool { _ in ScreenCapture(imageJPEG: Data([0xff, 0xd8])) }]
+        )
+
+        do {
+            try await session._start(config: config)
+            Issue.record("start must refuse — the capture payload has no channel")
+        } catch let error as SessionStartError {
+            #expect(error.code == .config)
+            #expect(error.serverCode == "screen_locate_unsupported")
+            #expect(error.message == "screen_locate is not supported on the websocket transport")
+        }
     }
 
     @Test("no rpcHandlers is the default and registers nothing extra")

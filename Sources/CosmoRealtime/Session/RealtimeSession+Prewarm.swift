@@ -78,5 +78,12 @@ extension RealtimeSession {
     public static func setAutomaticAudioSessionManagement(enabled: Bool) {
         AudioManager.shared.audioSession.isAutomaticConfigurationEnabled = enabled
     }
+
+    /// Whether the SDK still owns the `AVAudioSession`. Both transports read
+    /// this one switch, so an app that took ownership keeps it whichever
+    /// carrier a session runs on.
+    static var managesAudioSession: Bool {
+        AudioManager.shared.audioSession.isAutomaticConfigurationEnabled
+    }
     #endif
 }

@@ -2,63 +2,58 @@ import Foundation
 import Testing
 @testable import CosmoRealtime
 
-@Suite("RealtimeClient.Options credential surface")
+@Suite("RealtimeClient credential surface")
 struct SessionOptionsTests {
 
     private static let baseURL = URL(string: "https://platform.askcosmo.ai")!
 
-    @Test("init(apiKey:) yields an apiKey credential that can mint")
+    @Test("init(apiKey:) yields an apiKey credential")
     func apiKeyCredential() {
-        let options = RealtimeClient.Options(apiKey: "k")
-        #expect(options.credential == .apiKey("k"))
-        #expect(options.canMint == true)
+        let client = RealtimeClient(apiKey: "k")
+        #expect(client.credential == .apiKey("k"))
     }
 
-    @Test("init(token:) yields a token credential that cannot mint")
+    @Test("init(token:) yields a token credential")
     func tokenCredential() {
-        let options = RealtimeClient.Options(token: "jwt")
-        #expect(options.credential == .token("jwt"))
-        #expect(options.canMint == false)
+        let client = RealtimeClient(token: "jwt")
+        #expect(client.credential == .token("jwt"))
     }
 
-    @Test("designated init(credential:) preserves an apiKey credential that can mint")
+    @Test("designated init(credential:) preserves an apiKey credential")
     func designatedInitApiKey() {
-        let options = RealtimeClient.Options(credential: .apiKey("k"))
-        #expect(options.credential == .apiKey("k"))
-        #expect(options.canMint == true)
+        let client = RealtimeClient(credential: .apiKey("k"))
+        #expect(client.credential == .apiKey("k"))
     }
 
-    @Test("designated init(credential:) preserves a token credential that cannot mint")
+    @Test("designated init(credential:) preserves a token credential")
     func designatedInitToken() {
-        let options = RealtimeClient.Options(credential: .token("jwt"))
-        #expect(options.credential == .token("jwt"))
-        #expect(options.canMint == false)
+        let client = RealtimeClient(credential: .token("jwt"))
+        #expect(client.credential == .token("jwt"))
     }
 
-    @Test("options take their backend from the resolver, not the caller")
+    @Test("a client takes its backend from the resolver, not the caller")
     func baseURLComesFromResolver() {
-        #expect(RealtimeClient.Options(apiKey: "k").baseURL == RealtimeBaseURL.resolve())
+        #expect(RealtimeClient(apiKey: "k").baseURL == RealtimeBaseURL.resolve())
     }
 
-    @Test("init(tokenSource:) yields a tokenSource credential that cannot mint")
+    @Test("init(tokenSource:) yields a tokenSource credential")
     func tokenSourceCredential() {
         let source = TokenSource.custom {
             MintedToken(jwt: "jwt", expiresAt: Date().addingTimeInterval(3600))
         }
-        let options = RealtimeClient.Options(tokenSource: source)
-        #expect(options.credential == .tokenSource(source))
-        #expect(options.canMint == false)
+        let client = RealtimeClient(tokenSource: source)
+        #expect(client.credential == .tokenSource(source))
     }
 
     @Test("bearerToken returns the underlying secret for each case")
     func bearerTokenUnwraps() async throws {
-        #expect(try await RealtimeClient.Options.Credential.apiKey("k").bearerToken() == "k")
-        #expect(try await RealtimeClient.Options.Credential.token("jwt").bearerToken() == "jwt")
+        #expect(try await RealtimeClient.Credential.apiKey("k").bearerToken() == "k")
+        #expect(try await RealtimeClient.Credential.token("jwt").bearerToken() == "jwt")
         let source = TokenSource.custom {
             MintedToken(jwt: "fetched-jwt", expiresAt: Date().addingTimeInterval(3600))
         }
         #expect(
-            try await RealtimeClient.Options.Credential.tokenSource(source).bearerToken()
+            try await RealtimeClient.Credential.tokenSource(source).bearerToken()
                 == "fetched-jwt"
         )
     }
@@ -71,19 +66,19 @@ struct SessionOptionsTests {
         let source = TokenSource.custom(fetch)
         let other = TokenSource.custom(fetch)
         #expect(
-            RealtimeClient.Options.Credential.tokenSource(source) == .tokenSource(source)
+            RealtimeClient.Credential.tokenSource(source) == .tokenSource(source)
         )
         #expect(
-            RealtimeClient.Options.Credential.tokenSource(source) != .tokenSource(other)
+            RealtimeClient.Credential.tokenSource(source) != .tokenSource(other)
         )
-        #expect(RealtimeClient.Options.Credential.tokenSource(source) != .token("jwt"))
+        #expect(RealtimeClient.Credential.tokenSource(source) != .token("jwt"))
     }
 
     @Test("description and debugDescription mask the secret")
     func credentialMasksSecret() {
-        let key = RealtimeClient.Options.Credential.apiKey("super-secret-key")
-        let token = RealtimeClient.Options.Credential.token("super-secret-jwt")
-        let source = RealtimeClient.Options.Credential.tokenSource(
+        let key = RealtimeClient.Credential.apiKey("super-secret-key")
+        let token = RealtimeClient.Credential.token("super-secret-jwt")
+        let source = RealtimeClient.Credential.tokenSource(
             .custom { MintedToken(jwt: "jwt", expiresAt: Date()) }
         )
 
@@ -145,11 +140,11 @@ struct SessionOptionsTests {
 
     @Test("start rejects a cleartext remote base URL before any network call")
     func startThrowsOnInsecureBaseURL() async {
-        let options = RealtimeClient.Options(
+        let client = RealtimeClient(
             apiKey: "k", baseURL: URL(string: "http://example.com")!
         )
-        await #expect(throws: RealtimeSessionError.insecureBaseURL("http://example.com")) {
-            _ = try await RealtimeSession.start(options)
+        await #expect(throws: CredentialsError(code: .insecureBaseURL, message: "Realtime base URL must use https (http allowed only for localhost): http://example.com")) {
+            _ = try await RealtimeSession.start(client)
         }
     }
 }

@@ -11,5 +11,6 @@ import CoreGraphics
 /// `FaceGeometrySource` abstracts the tracking backends.
 @MainActor
 public protocol CameraStillProviding {
+    /// The most recent camera frame, or `nil` when no camera is running.
     func currentFrame() -> CGImage?
 }

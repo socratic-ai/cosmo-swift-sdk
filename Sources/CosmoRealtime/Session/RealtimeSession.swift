@@ -4,13 +4,41 @@ import Foundation
 import OpenAPIRuntime
 import os
 
+/// The session state machine, shared across the Cosmo SDKs
+/// (``idle → connecting → connected ↔ reconnecting → disconnected``).
+/// Read the current value as ``RealtimeSession/state``; observe every
+/// transition — from ``idle`` on — with the ``onStateChange`` handler on
+/// ``RealtimeAgent/start(resumeSessionId:maxSessionSeconds:storeRecording:storeAudio:storeTranscript:storeVideo:micMuted:rpcHandlers:onStateChange:)``.
+/// Distinct from the application-level ``RealtimeSessionEvent/ready(_:)``
+/// event. A transient recovery re-enters ``connected``.
+@frozen
+public enum SessionState: Sendable, Equatable {
+    /// Not started, and not yet connecting.
+    case idle
+    /// Joining the room and waiting for the server to report readiness.
+    case connecting
+    /// The transport has joined. ``start(_:config:)`` does not return until
+    /// the server also reports readiness, so a session you were handed is
+    /// past this point — but an `onStateChange` observer sees this state
+    /// first, while the agent may still be starting up.
+    case connected
+    /// The transport is recovering from a transient drop; the session
+    /// re-enters ``connected`` if it succeeds.
+    case reconnecting
+    /// Terminal. The ``RealtimeSession/events`` stream is finished.
+    /// ``reason`` is the cross-SDK ``DisconnectReason`` slug; ``detail``
+    /// carries the server's end slug or a transport message when one
+    /// exists — the same pair the sibling SDKs put on their state value.
+    case disconnected(reason: DisconnectReason, detail: String?)
+}
+
 /// A live realtime voice session speaking the published developer
 /// protocol. An agent's
-/// ``RealtimeAgent/start(resumeSessionId:maxSessionSeconds:storeRecording:storeAudio:storeTranscript:storeVideo:micMuted:rpcHandlers:)``
+/// ``RealtimeAgent/start(resumeSessionId:maxSessionSeconds:storeRecording:storeAudio:storeTranscript:storeVideo:micMuted:rpcHandlers:onStateChange:)``
 /// opens it; consumption is a single typed event stream:
 ///
 /// ```swift
-/// let client = RealtimeClient(.init(apiKey: "key"))
+/// let client = RealtimeClient(apiKey: "key")
 /// let agent = try client.agent(instructions: "You are a terse assistant.")
 /// let session = try await agent.start()
 /// for try await event in session.events {
@@ -33,22 +61,28 @@ public actor RealtimeSession {
 
     static let log = Logger(subsystem: CosmoRealtimeLog.subsystem, category: "session")
 
-    /// Package name, sent with ``sdkVersion`` as the SDK identity on every
-    /// Cosmo REST call.
-    public static let sdkName = "cosmo-swift-sdk"
+    /// The SwiftPM package name. Moved to the module's ``sdkName``, since it
+    /// describes the package rather than a session.
+    @available(*, deprecated, renamed: "sdkName")
+    public static let sdkName = CosmoRealtime.sdkName
 
-    /// Package version, sent as the SDK identity on every Cosmo REST call
-    /// and on the ``session-config`` start payload.
-    public static let sdkVersion = "0.7.0"
-
-    /// The ``X-Cosmo-SDK`` header value carried on every Cosmo REST call.
-    static let sdkIdentityHeaderValue = "\(sdkName)/\(sdkVersion)"
+    /// The package version. Moved to the module's ``sdkVersion``, since it
+    /// describes the package rather than a session.
+    @available(*, deprecated, renamed: "sdkVersion")
+    public static let sdkVersion = CosmoRealtime.sdkVersion
 
     /// Hard ceiling on a base64 image payload, mirroring the server-side
     /// ingress bound (`_MAX_IMAGE_B64_LEN`) so a frame the server would refuse
     /// never leaves the client — and never gets chunked across the control
     /// channel on its way to being refused.
     public static let maxImageBase64Length = 12_000_000
+
+    /// Bound on the wait between the transport joining and the server's
+    /// ``ready`` handshake. Deliberately longer than the server's own 30s
+    /// boot deadline — which fails a stuck boot as an ``error`` frame plus a
+    /// room close — so a failed boot arrives as that informative close
+    /// rather than this blind timeout; only genuine infra loss lands here.
+    static let readyTimeout: Double = 40
 
     /// Payload size at which a frame is decoded to check its pixel dimensions.
     ///
@@ -66,46 +100,19 @@ public actor RealtimeSession {
     /// times an hour.
     private var didWarnImageReencode = false
 
-    // MARK: Options
-
-    /// The client-level settings, spelled ``RealtimeClient/Options``
-    /// publicly; session code keeps the short name.
-    typealias Options = RealtimeClient.Options
-
-
-    // MARK: Lifecycle vocabulary
-
-    /// Transport-level lifecycle, observable via ``states``. Distinct
-    /// from the application-level ``Event/ready(_:)`` event.
-    @frozen
-    public enum State: Sendable, Equatable {
-        case idle
-        case connecting
-        case connected
-        /// The transport is recovering from a transient drop; the
-        /// session survives if it succeeds.
-        case reconnecting
-        /// Recovery succeeded — same session, same thread.
-        case reconnected
-        /// Terminal. The ``events`` stream is finished.
-        case disconnected(reason: EndReason)
+    private func emitState(_ next: SessionState) {
+        currentState = next
+        onStateChange?(next)
     }
 
-    /// Why a session reached ``State/disconnected(reason:)``.
-    @frozen
-    public enum EndReason: Sendable, Equatable {
-        /// This client called ``end()``.
+    /// Internal teardown vocabulary: the ``DisconnectReason`` slug plus the
+    /// payload each path carries. Lowered onto the public state and the
+    /// SessionEnd hook context via ``sessionDisconnectReason``.
+    enum CloseReason: Sendable, Equatable {
         case clientEnded
-        /// This client tore down without the wire ``end`` frame.
         case clientClosed
-        /// The server refused the session start. ``status`` is the HTTP
-        /// status of the rejection when it came from a real REST verdict
-        /// (nil for a scripted handshake-frame rejection).
         case handshakeFailed(status: Int?, detail: String?)
-        /// The server ended the session gracefully (the
-        /// ``Event/sessionEnded(_:)`` event carries the reason).
         case serverEnded(reason: String?)
-        /// The transport failed.
         case transportError(message: String)
     }
 
@@ -122,19 +129,17 @@ public actor RealtimeSession {
     // Read by the screen-share extension (forwards onto the transport,
     // which owns the screen-share state); only assigned in ``init``.
     let transport: any SessionTransport
-    // Client-level settings retained for post-start REST calls that reuse the
-    // session's backend, credential, and TLS policy (e.g. ``dial``). ``nil``
-    // when the session was constructed directly over a fake transport in tests.
-    let options: Options?
-    // Built on the first out-of-band REST read and kept, so polling a session
-    // does not stand up a URLSession per call.
-    var restClient: RealtimeClient?
+    // The client retained for post-start REST calls that reuse the session's
+    // backend, credential, and TLS policy (e.g. ``dial``, ``usage``), so
+    // polling a session does not stand up a URLSession per call. ``nil`` when
+    // the session was constructed directly over a fake transport in tests.
+    let client: RealtimeClient?
     private let reassembler = EnvelopeReassembler()
     private var lifecycle: Lifecycle = .idle
     private var hooks: HookEngine?
     // Reason latched from the server's best-effort ``session-ended`` frame;
     // consulted only on the unsolicited transport-close path.
-    private var serverEndReason: String?
+    private var serverDisconnectReason: String?
     private var serverEndGraceTask: Task<Void, Never>?
     /// Grace between a ``session-ended`` frame and a forced teardown when the
     /// expected transport close never follows. Per-session so a test can shorten
@@ -144,40 +149,53 @@ public actor RealtimeSession {
     /// Last mute state this client asserted; re-asserted on reconnect the same
     /// way the input binding is.
     private var lastSetMuted: Bool?
+    var audioStreamOperationRunning = false
+    var audioStreamOperationWaiters: [CheckedContinuation<Void, Never>] = []
     // Owns background client-tool jobs (a BackgroundClientTool acks fast + delivers
     // later); cancelled on teardown so in-flight jobs don't outlive the session.
     private var clientToolJobSink: ClientToolJobSink?
 
-    /// The session-start response. Held whole so a new server field is
-    /// decoded rather than dropped, but surfaced field by field — the join
-    /// credentials on it are spent by the transport and the token has no
-    /// business on a public accessor.
-    private var startResponse: RealtimeSessionResponse?
+    // One connect-timings report per session. Not private: the report itself
+    // lives in the sibling extension file.
+    var didReportConnectTimings = false
+
+    // Whether anything has shown the agent to be live: the ``ready`` frame,
+    // its track publishing, or it speaking. ``ready`` is a one-shot data
+    // frame a prepared-room session can miss, so it is not the only seam.
+    var didObserveReadiness = false
+
+    /// The transport-neutral result kept after start.
+    private var startedSessionId: String?
 
     /// Server-minted session identifier, set once the start succeeds.
-    public var sessionId: String? { startResponse?.sessionId }
+    public var sessionId: String? { startedSessionId }
 
 
 
     /// Typed server events in arrival order. Every terminal path of a live
     /// session — graceful ``end()``, server teardown, or a transport drop —
-    /// ends with a locally synthesized ``Event/sessionEnded(_:)`` as the
+    /// ends with a locally synthesized ``RealtimeSessionEvent/sessionEnded(_:)`` as the
     /// final element, after which the sequence finishes; the stream does
     /// **not** throw (the underlying transport cannot distinguish a clean
     /// server close from an abnormal drop, so neither does the stream). The
-    /// terminal reason is on ``Event/SessionEnded/reason`` and on
-    /// ``states`` (``State/disconnected(reason:)``). Start failures throw
+    /// terminal reason is on ``SessionEndedEvent/reason`` and on
+    /// ``state`` (``SessionState/disconnected(reason:)``). Start failures throw
     /// from ``start(_:config:)`` instead. Single consumer.
-    public nonisolated let events: AsyncThrowingStream<Event, Error>
-    private nonisolated let eventsContinuation: AsyncThrowingStream<Event, Error>.Continuation
+    public nonisolated let events: AsyncThrowingStream<RealtimeSessionEvent, Error>
+    private nonisolated let eventsContinuation: AsyncThrowingStream<RealtimeSessionEvent, Error>.Continuation
 
-    /// Transport lifecycle updates. Yields ``State/idle`` on creation
-    /// and finishes after the terminal ``State/disconnected(reason:)``.
-    public nonisolated let states: AsyncStream<State>
-    private nonisolated let statesContinuation: AsyncStream<State>.Continuation
+    /// The session state machine's current value; the terminal
+    /// ``SessionState/disconnected(reason:)`` stays readable after the
+    /// session ends. The full transition history — from
+    /// ``SessionState/idle`` on — is delivered to the ``onStateChange``
+    /// handler passed at start.
+    public var state: SessionState { currentState }
+    private var currentState: SessionState = .idle
+    private var onStateChange: (@Sendable (SessionState) -> Void)?
 
-    /// Fires once when the agent participant publishes a track — LiveKit's
-    /// race-free liveness signal, distinct from the wire ``Event/ready(_:)``
+    /// Fires once when the transport observes the agent live — its published
+    /// track on WebRTC (race-free), the first `ready` frame on the websocket.
+    /// Distinct from the wire ``RealtimeSessionEvent/ready(_:)``
     /// frame and deliberately not a substitute for it: only ``ready`` carries
     /// the session id, the rejected-tool list, and the effective duration cap.
     ///
@@ -189,12 +207,43 @@ public actor RealtimeSession {
     private nonisolated let agentLiveContinuation: AsyncStream<Void>.Continuation
     private var didSignalAgentLive = false
 
+    /// Coalesced conversation state, folded from the transcript and
+    /// turn-complete streams. Survives teardown so ``transcript`` stays
+    /// readable after the session ends.
+    private var transcriptStore = TranscriptStore()
+
+    /// The coalesced conversation so far — one item per turn, folded by
+    /// the session from its own transcript stream.
+    /// ``RealtimeSessionEvent/transcriptUpdated(_:)`` is yielded on
+    /// ``events`` with the new value on every change. Survives ``end()``,
+    /// so the full conversation stays readable after the session ends.
+    public var transcript: [TranscriptItem] {
+        transcriptStore.current
+    }
+
     /// Tasks parked in ``waitUntilEnded()``, all resumed once by ``_close``.
     private var endWaiters: [CheckedContinuation<Void, Never>] = []
 
     /// Tasks parked in ``waitUntilAgentLive()``. Resumed by the agent-track
     /// signal, or by ``_close`` so a session that dies first never hangs them.
     private var agentLiveWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Waiters on the ready handshake — ``start()``'s own gate. Resumed with
+    /// success by ``ready`` (either delivery) and with the window's typed
+    /// failure by any terminal transition.
+    private var readyWaiters: [CheckedContinuation<Result<Void, any Error>, Never>] = []
+    /// True once the sign has been read, from either delivery. The second
+    /// arrival reaches no surface.
+    private var didObserveReady = false
+    /// Pre-ready ``error`` frame, stashed as enrichment: a failed boot closes
+    /// the room, and this upgrades that close's thrown error with the
+    /// server's own code and message.
+    private var pendingHandshakeError: (code: String, message: String)?
+    /// The outcome the ready gate should settle with, set by an exit that has
+    /// a more specific verdict than the close itself carries (the timeout, a
+    /// cancellation). ``_close`` is the one place that settles, and it settles
+    /// last — so an exit records its verdict here rather than resuming the
+    /// waiter early and letting ``start`` throw mid-teardown.
+    private var pendingReadyOutcome: Result<Void, any Error>?
 
     /// Resource teardown bound to this session's lifetime, run once by
     /// ``_close`` before any end-waiter wakes.
@@ -253,32 +302,30 @@ public actor RealtimeSession {
 
     init(
         transport: any SessionTransport,
-        options: Options? = nil,
+        client: RealtimeClient? = nil,
         serverEndGraceNanos: UInt64 = defaultServerEndGraceNanos
     ) {
         self.transport = transport
-        self.options = options
+        self.client = client
         self.serverEndGraceNanos = serverEndGraceNanos
-        let eventStream = AsyncThrowingStream<Event, Error>.makeStream(bufferingPolicy: .unbounded)
+        let eventStream = AsyncThrowingStream<RealtimeSessionEvent, Error>.makeStream(bufferingPolicy: .unbounded)
         self.events = eventStream.stream
         self.eventsContinuation = eventStream.continuation
-        let stateStream = AsyncStream<State>.makeStream(bufferingPolicy: .bufferingNewest(64))
-        self.states = stateStream.stream
-        self.statesContinuation = stateStream.continuation
         let agentLiveStream = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         self.agentLive = agentLiveStream.stream
         self.agentLiveContinuation = agentLiveStream.continuation
-        self.statesContinuation.yield(.idle)
     }
 
-    /// The transport observed the agent publish its track. Signal readiness
+    /// The transport observed the agent go live. Signal readiness
     /// once (idempotent); the app wrapper latches on it. Never yields on the
     /// wire-facing ``events`` stream, so the external-protocol contract is
     /// unchanged.
     private func _agentBecameLive() {
         guard !didSignalAgentLive else { return }
         didSignalAgentLive = true
-        Self.log.info("realtime.agent_track_observed — readiness signalled from track (ready frame independent)")
+        didObserveReadiness = true
+        _reportConnectTimings()
+        Self.log.info("realtime.agent_live_observed — readiness signalled from the transport")
         agentLiveContinuation.yield(())
         let waiters = agentLiveWaiters
         agentLiveWaiters = []
@@ -286,8 +333,9 @@ public actor RealtimeSession {
     }
 
     /// Start a session: one REST session-start + media-transport join.
-    /// Returns once the transport is live; await ``Event/ready(_:)`` on
-    /// ``events`` for the agent-ready signal.
+    /// Returns once the transport is live — the ready gate is
+    /// ``_awaitReady(timeout:)``, which ``RealtimeAgent/start`` holds for
+    /// before handing a session back.
     /// - Parameter micMuted: when `true`, the session joins WITHOUT
     ///   publishing the microphone — nothing is captured or sent until the
     ///   first ``setMuted(false)``. A session the host presents as "muted"
@@ -300,22 +348,49 @@ public actor RealtimeSession {
     ///   these are the register-only complement. On a name collision the
     ///   ``rpcHandlers`` entry wins.
     static func start(
-        _ options: Options,
+        _ client: RealtimeClient,
         config: SessionConfig = SessionConfig(),
         micMuted: Bool = false,
-        rpcHandlers: [String: ClientToolHandler] = [:]
+        rpcHandlers: [String: ClientToolHandler] = [:],
+        onStateChange: (@Sendable (SessionState) -> Void)? = nil
     ) async throws -> RealtimeSession {
-        guard Self.isSecureBaseURL(options.baseURL) else {
-            throw RealtimeSessionError.insecureBaseURL(options.baseURL.absoluteString)
+        guard Self.isSecureBaseURL(client.baseURL) else {
+            throw CredentialsError(
+                code: .insecureBaseURL,
+                message: "Realtime base URL must use https "
+                    + "(http allowed only for localhost): \(client.baseURL.absoluteString)"
+            )
         }
-        let session = RealtimeSession(
-            transport: LiveKitSessionTransport(options: options), options: options
-        )
-        try await session._start(
-            config: config,
-            micMuted: micMuted,
-            rpcHandlers: rpcHandlers
-        )
+        let transport: any SessionTransport
+        switch client.sessionTransport {
+        case .webrtc, .livekit:
+            transport = LiveKitSessionTransport(client: client)
+        case .websocket:
+            transport = WebSocketSessionTransport(client: client)
+        }
+        let session = RealtimeSession(transport: transport, client: client)
+        do {
+            try await session._start(
+                config: config,
+                micMuted: micMuted,
+                rpcHandlers: rpcHandlers,
+                onStateChange: onStateChange
+            )
+        } catch {
+            // Cancellation during the REST start or the room join reaches
+            // those layers as whatever they throw — a URLSession cancel, a
+            // LiveKit abort — and the mapping above turns it into a start
+            // failure. A cancelled task is not a failed session: report the
+            // window's cancel exit for the whole of ``start``, not only its
+            // ready wait. The mapping already tore the session down before
+            // throwing, so the invariant holds on this path too.
+            if Task.isCancelled { throw CancellationError() }
+            throw error
+        }
+        // ``start`` resolves at ready: a returned session is usable, and a
+        // handshake that never completes is a start failure rather than a
+        // live-looking object whose every send throws.
+        try await session._awaitReady()
         return session
     }
 
@@ -339,13 +414,16 @@ public actor RealtimeSession {
     func _start(
         config: SessionConfig,
         micMuted: Bool = false,
-        rpcHandlers: [String: ClientToolHandler] = [:]
+        rpcHandlers: [String: ClientToolHandler] = [:],
+        onStateChange: (@Sendable (SessionState) -> Void)? = nil
     ) async throws {
         guard case .idle = lifecycle else {
-            throw RealtimeSessionError.alreadyStarted
+            throw SessionStateError(code: .alreadyStarted, message: "RealtimeSession.start already ran for this session; start a new session instead.")
         }
+        self.onStateChange = onStateChange
+        emitState(.idle)
         lifecycle = .connecting
-        statesContinuation.yield(.connecting)
+        emitState(.connecting)
 
         var config = config
         self.hooks = config.hookEngine
@@ -365,7 +443,7 @@ public actor RealtimeSession {
             let message = "session-config encode failed: \(error.localizedDescription)"
             Self.log.error("\(message, privacy: .public)")
             await _close(reason: .transportError(message: message))
-            throw RealtimeSessionError.sessionStartFailed(message: message)
+            throw SessionStartError(code: .config, message: message)
         }
 
         let callbacks = SessionTransportCallbacks(
@@ -385,65 +463,116 @@ public actor RealtimeSession {
                 isOpen: { [weak self] in await self?._isSendable() ?? false }
             )
             self.clientToolJobSink = sink
+            // The locator's capture payload travels as a byte stream, a
+            // channel the single-socket carrier does not have — refusing
+            // here means the capture handler never runs.
+            if !config.screenLocateTools.isEmpty, !transport.supportsByteStreams {
+                throw SessionStartFailure.unsupportedCapability(
+                    code: "screen_locate_unsupported",
+                    detail: "screen_locate is not supported on the websocket transport"
+                )
+            }
+            let rpcOnlyHandlers = config.rpcOnlyHandlers()
+            let advertisedToolHandlers = config.clientToolHandlers()
             info = try await transport.connect(
                 configFrame: configFrame,
                 callbacks: callbacks,
-                clientToolHandlers: config.clientToolHandlers()
-                    .merging(config.rpcOnlyHandlers()) { _, rpcOnly in rpcOnly }
+                clientToolHandlers: advertisedToolHandlers
+                    .merging(rpcOnlyHandlers) { _, rpcOnly in rpcOnly }
                     .merging(rpcHandlers) { _, registerOnly in registerOnly },
                 backgroundClientToolHandlers: config.backgroundClientToolHandlers(),
                 clientToolJobSink: sink,
                 hooks: config.hookEngine,
+                // An advertised name is a tool call whatever supplied its
+                // handler, so a caller-registered override never exempts it.
+                hookExemptMethods: Set(rpcOnlyHandlers.keys)
+                    .union(rpcHandlers.keys)
+                    .subtracting(advertisedToolHandlers.keys),
                 micMuted: micMuted
             )
         } catch let failure as SessionStartFailure {
             switch failure {
-            case .rejected(let status, let code, let detail):
+            case .rejected(let status, let code, let detail, let retryAfter, let rejection):
                 Self.log.error("session start rejected status=\(status.map(String.init) ?? "nil", privacy: .public) code=\(code ?? "nil", privacy: .public) detail=\(detail, privacy: .public)")
-                if status == 401, let options, case .tokenSource(let source) = options.credential {
+                if status == 401, let client, case .tokenSource(let source) = client.credential {
                     // Rejected despite the refresh skew — revoked, or clocks
                     // disagree: drop the cache so the next start fetches fresh.
                     await source.invalidate()
                 }
                 await _close(reason: .handshakeFailed(status: status, detail: detail))
-                if code == "version_mismatch" {
-                    throw RealtimeSessionError.versionMismatch(detail: detail)
-                }
-                if status == 503 {
-                    throw RealtimeSessionError.voiceDisabled
-                }
-                if let status {
-                    throw RealtimeSessionError.handshakeFailed(
-                        status: status, code: code, detail: detail
-                    )
-                }
-                throw RealtimeSessionError.sessionStartFailed(message: detail)
+                // One construction for every rejection: the code is the only
+                // thing that varies, so status, slug and body ride along
+                // whatever it turns out to be.
+                let rejectionCode: SessionStartErrorCode =
+                    code == "version_mismatch"
+                    ? .versionMismatch
+                    : classifyStartRejection(serverCode: code, status: status)
+                throw SessionStartError(
+                    code: rejectionCode,
+                    message: status == 503
+                        ? "Realtime voice is temporarily unavailable."
+                        : detail,
+                    status: status,
+                    serverCode: code,
+                    retryAfterSeconds: retryAfter,
+                    detail: rejection
+                )
+            case .unsupportedCapability(let code, let detail):
+                Self.log.error("session start refused capability code=\(code, privacy: .public)")
+                await _close(reason: .handshakeFailed(status: nil, detail: detail))
+                throw SessionStartError(code: .config, message: detail, serverCode: code)
             case .credential(let error):
                 Self.log.error("session start credential resolution failed: \(error.localizedDescription, privacy: .public)")
                 await _close(reason: .transportError(message: error.localizedDescription))
-                // Un-erased on purpose: the caller branches on the mint slug
-                // (``token_source_failed`` vs a server rejection), matching
-                // the TypeScript and Python SDKs.
+                // Un-erased on purpose: the caller branches on the
+                // token-source code, matching the TypeScript and Python SDKs.
                 throw error
+            case .roomLostDuringJoin(let reason):
+                // The room went down mid-join: a boot that failed fast. The
+                // close it reported — plus any error frame the session
+                // stashed before the data channel went — is the verdict, not
+                // the join's own error.
+                Self.log.error("session start: room lost during join reason=\(String(describing: reason), privacy: .public)")
+                let failure = _handshakeFailure()
+                await _close(reason: reason)
+                throw failure
+                    ?? SessionStartError(
+                        code: .handshakeFailed,
+                        message: "the room closed before the session was ready"
+                    )
             case .transport(let message):
                 Self.log.error("session start transport failure: \(message, privacy: .public)")
                 await _close(reason: .transportError(message: message))
-                throw RealtimeSessionError.sessionStartFailed(message: message)
+                throw SessionStartError(code: .transport, message: message)
+            case .invalidResponse(let message):
+                Self.log.error("session start invalid response: \(message, privacy: .public)")
+                await _close(reason: .transportError(message: message))
+                throw SessionStartError(code: .invalidResponse, message: message)
+            case .joinFailed(let message):
+                Self.log.error("session start join failure: \(message, privacy: .public)")
+                await _close(reason: .transportError(message: message))
+                throw SessionStartError(code: .joinFailed, message: message)
+            case .captureUnavailable(let code, let message):
+                Self.log.error("session start capture failure code=\(code.rawValue, privacy: .public) \(message, privacy: .public)")
+                await _close(reason: .transportError(message: message))
+                throw AudioUnavailableError(message: message, code: code)
             }
         } catch {
             Self.log.error("session start failed: \(error.localizedDescription, privacy: .public)")
             await _close(reason: .transportError(message: error.localizedDescription))
-            throw RealtimeSessionError.sessionStartFailed(message: error.localizedDescription)
+            // Nothing here reached a server verdict — a typed rejection would
+            // have been caught by the arm above.
+            throw SessionStartError(code: .transport, message: error.localizedDescription)
         }
 
         guard case .connecting = lifecycle else {
             // A concurrent ``end()`` raced the connect; the transport
             // teardown already ran via ``_close``.
-            throw RealtimeSessionError.notConnected
+            throw SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.")
         }
-        startResponse = info.response
+        startedSessionId = info.sessionId
         lifecycle = .connected
-        statesContinuation.yield(.connected)
+        emitState(.connected)
         // A capture only fires once the locator calls, well after this, so the
         // late bind never races. Weak because the transport retains the
         // handlers, which retain the capture slot — binding self strongly
@@ -461,6 +590,10 @@ public actor RealtimeSession {
         // The transport publishes the mic during connect, so this client is the
         // human voice: bind the agent's input.
         await _sendBindInput()
+        // Covers the ordering where a readiness signal landed before the
+        // transport finished recording its phases; the ordinary order is
+        // covered from the signal itself.
+        _reportConnectTimings()
         Self.log.info("session started sessionId=\(info.sessionId, privacy: .public)")
     }
 
@@ -468,7 +601,11 @@ public actor RealtimeSession {
 
     /// Send a text turn to the agent. The agent replies in whatever modality
     /// the session runs in.
-    public func send(text: String) async throws {
+    ///
+    /// The sent text lands in ``transcript`` as its own closed user turn
+    /// (the server does not echo typed input back); an in-progress speech
+    /// transcription is untouched. Pass `transcript: false` to keep it out.
+    public func send(text: String, transcript: Bool = true) async throws {
         try _assertSendable()
         try await _publish(
             CosmoRealtimeAPI.Components.Schemas.ClientText(
@@ -476,6 +613,19 @@ public actor RealtimeSession {
                 _type: .sendText
             )
         )
+        // The echo is a complete turn of its own — never folded through the
+        // wire-final path, which would replace an in-progress speech bubble.
+        if transcript {
+            let changed = transcriptStore.appendClosed(role: .user, text: text)
+            eventsContinuation.yield(
+                .transcript(TranscriptDeltaEvent(isFinal: true, role: .user, text: text, _type: .transcript))
+            )
+            if changed {
+                eventsContinuation.yield(
+                    .transcriptUpdated(TranscriptUpdatedEvent(items: transcriptStore.current))
+                )
+            }
+        }
     }
 
     /// Give the agent context without asking it anything.
@@ -494,11 +644,55 @@ public actor RealtimeSession {
         )
     }
 
+    /// Hand the model background it keeps to itself and draws on when
+    /// relevant. `delegationId` names the
+    /// ``RealtimeSessionEvent/delegationCreated(_:)`` this answers; `nil`
+    /// steers the session as a whole.
+    public func appendThinking(_ content: String, delegationId: String? = nil) async throws {
+        try await _appendDelegation(.thinking, content: content, delegationId: delegationId)
+    }
+
+    /// Give the model something to say now, in its own words rather than
+    /// verbatim. `delegationId` names the
+    /// ``RealtimeSessionEvent/delegationCreated(_:)`` this answers; `nil`
+    /// steers the session as a whole.
+    public func appendCommentary(_ content: String, delegationId: String? = nil) async throws {
+        try await _appendDelegation(.commentary, content: content, delegationId: delegationId)
+    }
+
+    /// Change how the model behaves from here on. `delegationId` names the
+    /// ``RealtimeSessionEvent/delegationCreated(_:)`` this answers; `nil`
+    /// steers the session as a whole.
+    public func appendInstructions(_ content: String, delegationId: String? = nil) async throws {
+        try await _appendDelegation(.instructions, content: content, delegationId: delegationId)
+    }
+
+    private func _appendDelegation(
+        _ channel: DelegationChannel, content: String, delegationId: String?
+    ) async throws {
+        try _assertSendable()
+        try await _publish(
+            CosmoRealtimeAPI.Components.Schemas.DelegationAppend(
+                channel: .init(channel),
+                content: content,
+                delegationId: delegationId,
+                _type: .delegationAppend
+            )
+        )
+    }
+
     /// Mute or unmute the microphone. Sends the wire ``mute`` frame
     /// (so the agent can update VAD state) and toggles local capture.
     /// Throws if the capture toggle fails — notably a denied-permission
-    /// first publish when unmuting a session that joined muted.
+    /// first publish when unmuting a session that joined muted, which
+    /// surfaces as ``AudioUnavailableError`` carrying the reason.
     public func setMuted(_ muted: Bool) async throws {
+        await beginAudioStreamOperation()
+        defer { endAudioStreamOperation() }
+        try await _setMuted(muted)
+    }
+
+    func _setMuted(_ muted: Bool) async throws {
         try _assertSendable()
         try await _publish(
             CosmoRealtimeAPI.Components.Schemas.ClientMute(muted: muted, _type: .mute)
@@ -507,7 +701,7 @@ public actor RealtimeSession {
         lastSetMuted = muted
     }
 
-    /// Keep-alive; the server replies with ``Event/pong``.
+    /// Keep-alive; the server replies with ``RealtimeSessionEvent/pong``.
     public func ping() async throws {
         try _assertSendable()
         try await _publish(
@@ -703,12 +897,94 @@ public actor RealtimeSession {
         )
     }
 
-    /// Suspend until the agent participant has published a track, or the
+    /// Resume every waiter on the ready gate, once per outcome.
+    private func _settleReadyWaiters(_ outcome: Result<Void, any Error>) {
+        let waiters = readyWaiters
+        readyWaiters = []
+        for waiter in waiters { waiter.resume(returning: outcome) }
+    }
+
+    /// The window's close exit as a typed error, when the evidence for one
+    /// exists: the server's stashed pre-ready ``error`` frame (enrichment),
+    /// or a session already closed before ``ready``. ``nil`` when neither.
+    private func _handshakeFailure() -> SessionStartError? {
+        if didObserveReady { return nil }
+        // A close is the authoritative failure; a stashed error frame only
+        // supplies its detail. The frame alone settles nothing — the session
+        // may still be coming up.
+        guard case .closed = lifecycle else { return nil }
+        // Synthetic status ``0``: no HTTP exchange failed — the room closed
+        // before ready, and the server's frame is the detail when it sent one.
+        if let stashed = pendingHandshakeError {
+            return SessionStartError(
+                code: .handshakeFailed,
+                message: stashed.message,
+                serverCode: stashed.code
+            )
+        }
+        return SessionStartError(
+            code: .handshakeFailed,
+            message: serverDisconnectReason ?? "the session ended before ready"
+        )
+    }
+
+    /// Hold ``start`` until the server's ready handshake lands, so a returned
+    /// session is usable. The window contract's four exits: the sign
+    /// (attribute or frame) resolves it; a pre-ready close throws
+    /// ``SessionStartError`` carrying
+    /// any stashed enrichment; silence past ``readyTimeout`` throws
+    /// ``SessionStartError``; and task cancellation
+    /// tears the session down and throws ``CancellationError``.
+    func _awaitReady(timeout: Double = RealtimeSession.readyTimeout) async throws {
+        if didObserveReady { return }
+        if let failure = _handshakeFailure() { throw failure }
+        let deadline = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            if Task.isCancelled { return }
+            await self?._readyDeadlineReached(timeout: timeout)
+        }
+        defer { deadline.cancel() }
+        let outcome: Result<Void, any Error> = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if didObserveReady {
+                    continuation.resume(returning: .success(()))
+                } else if let failure = _handshakeFailure() {
+                    continuation.resume(returning: .failure(failure))
+                } else {
+                    readyWaiters.append(continuation)
+                }
+            }
+        } onCancel: {
+            // Cooperative: a parked continuation ignores a cancelled task
+            // unless something resumes it. The teardown that follows releases
+            // the room, the microphone, and the session slot.
+            Task { [weak self] in await self?._readyWaitCancelled() }
+        }
+        try outcome.get()
+    }
+
+    private func _readyDeadlineReached(timeout: Double) async {
+        guard !didObserveReady, !readyWaiters.isEmpty else { return }
+        let failure = SessionStartError(code: .readyTimeout, message: "The server's ready handshake did not arrive within \(Int(timeout))s.")
+        pendingReadyOutcome = .failure(failure)
+        await _close(
+            reason: .handshakeFailed(status: nil, detail: failure.localizedDescription)
+        )
+    }
+
+    private func _readyWaitCancelled() async {
+        guard !didObserveReady else { return }
+        pendingReadyOutcome = .failure(CancellationError())
+        await _close(reason: .clientClosed)
+    }
+
+    /// Suspend until the transport has observed the agent live — its media
+    /// track on WebRTC, the first `ready` frame on the websocket — or the
     /// session ends first. Returns immediately if it already has.
     ///
     /// This is liveness, not readiness: it proves an agent is on the other
     /// end, and carries no session metadata. Keep awaiting
-    /// ``Event/ready(_:)`` on ``events`` for the session id, rejected tools,
+    /// ``RealtimeSessionEvent/ready(_:)`` on ``events`` for the session id, rejected tools,
     /// and the effective duration cap.
     public func waitUntilAgentLive() async {
         if didSignalAgentLive { return }
@@ -733,7 +1009,7 @@ public actor RealtimeSession {
     }
 
     /// Gracefully end the session: best-effort wire ``end`` frame, then
-    /// terminal teardown with ``EndReason/clientEnded``. Idempotent.
+    /// terminal teardown with ``DisconnectReason/clientEnded``. Idempotent.
     /// Teardown is immediate — events still in flight are dropped, so
     /// consume the turn's final transcript event before ending if you
     /// need it.
@@ -772,7 +1048,7 @@ public actor RealtimeSession {
         case .connected, .reconnecting:
             break
         default:
-            throw RealtimeSessionError.notConnected
+            throw SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.")
         }
     }
 
@@ -789,7 +1065,7 @@ public actor RealtimeSession {
         let data = try JSONEncoder().encode(frame)
         let outbound = buildOutboundPackets(data)
         guard !outbound.packets.isEmpty else {
-            throw RealtimeSessionError.invalidPayload(
+            throw SessionStateError(code: .invalidPayload, message: 
                 "refusing to nest envelope-chunk inside another envelope"
             )
         }
@@ -823,35 +1099,93 @@ public actor RealtimeSession {
                 eventsContinuation.yield(.unknown(rawType: "server-envelope-chunk", payload: data))
             }
         case .serverSessionEnded(let reason):
-            serverEndReason = reason
+            serverDisconnectReason = reason
             _armServerEndGrace()
         case .event(let event):
+            var transcriptChanged = false
+            switch event {
+            case .ready(let ready):
+                // ``ready`` arrives on two channels — the agent's participant
+                // attribute (room state, read by late joiners) and the
+                // data-channel frame. First delivery wins; the echo reaches
+                // no surface.
+                if didObserveReady { return }
+                didObserveReady = true
+                for rejected in ready.rejectedTools {
+                    Self.log.warning(
+                        "server rejected tool spec \"\(rejected.name, privacy: .public)\": \(rejected.reason, privacy: .public)"
+                    )
+                }
+                transport.timings.markReady()
+                didObserveReadiness = true
+                _reportConnectTimings()
+                _settleReadyWaiters(.success(()))
+            case .botStartedSpeaking:
+                // Readiness for the connect-timings report only: a prepared-room
+                // session can miss the one-shot ``ready`` frame, and the agent
+                // speaking proves it came up. It is not a window exit — the
+                // sign is, and ``_settleReadyWaiters`` stays with it.
+                didObserveReadiness = true
+                _reportConnectTimings()
+            case .error(let error):
+                // Before ready, an error frame is enrichment for the room
+                // close a failed boot sends next — stashed so that close
+                // throws with the server's own code and message. The frame
+                // itself settles nothing: the close is authoritative.
+                if !didObserveReady {
+                    pendingHandshakeError = (
+                        code: error.code.rawValue, message: error.message
+                    )
+                }
+            case .transcript(let delta):
+                // Fold into the session-owned transcript before the event
+                // is yielded, so a consumer reading ``transcript`` on any
+                // event always sees this delta applied.
+                transcriptChanged = transcriptStore.applyDelta(
+                    role: delta.role, text: delta.text, isFinal: delta.isFinal
+                )
+            case .turnComplete(let complete):
+                transcriptChanged = transcriptStore.applyTurnComplete(role: complete.role)
+            default:
+                break
+            }
             eventsContinuation.yield(event)
+            if transcriptChanged {
+                eventsContinuation.yield(
+                    .transcriptUpdated(TranscriptUpdatedEvent(items: transcriptStore.current))
+                )
+            }
         }
     }
 
     private func _transportReconnecting() {
         guard case .connected = lifecycle else { return }
         lifecycle = .reconnecting
-        statesContinuation.yield(.reconnecting)
+        emitState(.reconnecting)
     }
 
     private func _transportReconnected() {
         guard case .reconnecting = lifecycle else { return }
         lifecycle = .connected
-        statesContinuation.yield(.reconnected)
+        emitState(.connected)
         // The one-shot bind doesn't survive a transport drop; this surface is
         // always the voice (it publishes the mic during connect), so re-assert
         // the input binding on the recovered connection.
         Task { [weak self] in await self?._sendBindInput() }
         // The server-side mic gate is session-server state that may reset with
         // the transport; re-assert the last state this client set. Best-effort.
-        if let muted = lastSetMuted {
-            Task { [weak self] in await self?._resendMute(muted) }
+        if lastSetMuted != nil {
+            Task { [weak self] in await self?._resendMute() }
         }
     }
 
-    private func _resendMute(_ muted: Bool) async {
+    /// Rides the audio-operation queue and reads ``lastSetMuted`` once inside
+    /// it, so a mute in flight at reconnect time finishes first and the
+    /// re-assert can never bury a newer frame under a stale one.
+    private func _resendMute() async {
+        await beginAudioStreamOperation()
+        defer { endAudioStreamOperation() }
+        guard let muted = lastSetMuted else { return }
         do {
             try await _publish(
                 CosmoRealtimeAPI.Components.Schemas.ClientMute(muted: muted, _type: .mute)
@@ -882,8 +1216,8 @@ public actor RealtimeSession {
     /// reason wins over the transport's own classification of the same
     /// close. Client-initiated paths call ``_close`` directly and ignore
     /// the latch.
-    private func _transportClosed(_ reason: EndReason) async {
-        await _close(reason: serverEndReason.map { .serverEnded(reason: $0) } ?? reason)
+    private func _transportClosed(_ reason: CloseReason) async {
+        await _close(reason: serverDisconnectReason.map { .serverEnded(reason: $0) } ?? reason)
     }
 
     /// ``session-ended`` is normally followed by the transport closing; if
@@ -901,17 +1235,35 @@ public actor RealtimeSession {
     private func _serverEndGraceFired() async {
         serverEndGraceTask = nil
         if case .closed = lifecycle { return }
-        guard let reason = serverEndReason else { return }
+        guard let reason = serverDisconnectReason else { return }
         Self.log.warning("session-ended without a transport close — forcing teardown")
         await _close(reason: .serverEnded(reason: reason))
     }
 
     /// Single terminal teardown path. Idempotent; synthesizes the
-    /// terminal ``Event/sessionEnded(_:)`` sentinel as the final event of
+    /// terminal ``RealtimeSessionEvent/sessionEnded(_:)`` sentinel as the final event of
     /// a session that reached the live stream, finishes both streams, and
     /// closes the transport.
-    private func _close(reason: EndReason) async {
+    private func _close(reason: CloseReason) async {
         if case .closed = lifecycle { return }
+        // One ending, one reason: a close before ``ready`` is the window's
+        // handshake failure on every surface — what ``start`` throws, the
+        // state ``onStateChange`` reports, the stream's terminal item, and
+        // the SessionEnd hook. The server-ended and transport-error reasons
+        // describe a session that lived.
+        var reason = reason
+        if !didObserveReady {
+            switch reason {
+            case .serverEnded(let detail):
+                reason = .handshakeFailed(
+                    status: nil, detail: detail ?? serverDisconnectReason
+                )
+            case .transportError(let message):
+                reason = .handshakeFailed(status: nil, detail: message)
+            default:
+                break
+            }
+        }
         serverEndGraceTask?.cancel()
         serverEndGraceTask = nil
         let wasLive: Bool
@@ -926,7 +1278,7 @@ public actor RealtimeSession {
         clientToolJobSink = nil
         Self.log.info("session closed reason=\(String(describing: reason), privacy: .public)")
         if let hooks {
-            let (hookReason, detail) = reason.sessionEndReason
+            let (hookReason, detail) = reason.sessionDisconnectReason
             await hooks.runSessionEnd(
                 SessionEndContext(reason: hookReason, detail: detail, sessionId: self.sessionId)
             )
@@ -936,17 +1288,43 @@ public actor RealtimeSession {
         // session that reached the live stream ends with a locally
         // synthesized terminal sentinel as its final event; start-time
         // failures (never live) just finish. Mirrors the reference SDK.
-        if wasLive {
-            eventsContinuation.yield(.sessionEnded(SessionEnded(reason: reason.endedReason)))
+        // Close any still-open bubble before the terminal sentinel, so a
+        // consumer draining to the end sees finals only; the current value
+        // stays readable on ``transcript`` after the stream finishes.
+        if transcriptStore.closeOpen() {
+            eventsContinuation.yield(
+                .transcriptUpdated(TranscriptUpdatedEvent(items: transcriptStore.current))
+            )
         }
-        statesContinuation.yield(.disconnected(reason: reason))
-        statesContinuation.finish()
+        if wasLive {
+            eventsContinuation.yield(.sessionEnded(SessionEndedEvent(reason: reason.endedReason)))
+        }
+        let (slug, detail) = reason.sessionDisconnectReason
+        emitState(.disconnected(reason: slug, detail: detail))
+        onStateChange = nil
         eventsContinuation.finish()
         agentLiveContinuation.finish()
         await transport.close()
         if let onClose {
             self.onClose = nil
             await onClose()
+        }
+        // The ready gate settles with the window's typed close exit: a caller
+        // parked in ``start`` learns the handshake failed rather than waiting
+        // out the ready budget on a session that is already gone.
+        if !didObserveReady {
+            let outcome = pendingReadyOutcome
+            pendingReadyOutcome = nil
+            _settleReadyWaiters(
+                outcome
+                    ?? .failure(
+                        _handshakeFailure()
+                            ?? SessionStartError(
+                                code: .handshakeFailed,
+                                message: "the session ended before ready"
+                            )
+                    )
+            )
         }
         // Last: a waiter that wakes up sees a fully torn-down session. The
         // agent-live waiters are released too — the agent never showed, and
@@ -960,7 +1338,7 @@ public actor RealtimeSession {
     }
 }
 
-extension RealtimeClient.Options {
+extension RealtimeClient {
     /// The middleware stack every generated-client construction shares: bearer
     /// auth, and the room ref when a prepared room was taken.
     func _apiMiddlewares(
@@ -978,9 +1356,9 @@ extension RealtimeClient.Options {
     }
 }
 
-extension RealtimeSession.EndReason {
+extension RealtimeSession.CloseReason {
     /// Informational reason string carried on the synthesized
-    /// ``RealtimeSession/Event/sessionEnded(_:)`` sentinel.
+    /// ``RealtimeSessionEvent/sessionEnded(_:)`` sentinel.
     var endedReason: String? {
         switch self {
         case .clientEnded: return "client_ended"
@@ -992,7 +1370,7 @@ extension RealtimeSession.EndReason {
     }
 
     /// Typed ``(reason, detail)`` pair for the ``SessionEndContext``.
-    var sessionEndReason: (reason: DisconnectReason, detail: String?) {
+    var sessionDisconnectReason: (reason: DisconnectReason, detail: String?) {
         switch self {
         case .clientEnded: return (.clientEnded, nil)
         case .clientClosed: return (.clientClosed, nil)
@@ -1005,81 +1383,49 @@ extension RealtimeSession.EndReason {
 
 // MARK: - Errors
 
-public enum RealtimeSessionError: Error, LocalizedError, Equatable {
-    /// The server refused the session start because this SDK speaks an
-    /// incompatible protocol version. Upgrade the SDK.
-    case versionMismatch(detail: String)
-    /// The backend returned HTTP 503: realtime voice is temporarily
-    /// unavailable (provider/LiveKit not configured, or an infra 503).
-    /// Branch on this to show a "voice unavailable" state rather than a
-    /// generic failure.
-    case voiceDisabled
-    /// The server refused the session start with an HTTP rejection that
-    /// wasn't a more specific case (auth failure, bad request, …);
-    /// ``status`` is the HTTP status, ``code`` the machine-readable rejection
-    /// slug for typed rejections (e.g. ``invalid_tool_config`` /
-    /// ``name_conflict`` — branch on it instead of matching the human
-    /// message), and ``detail`` the server detail when available.
-    case handshakeFailed(status: Int, code: String?, detail: String?)
-    /// The session start failed (server rejection or transport
-    /// failure); ``message`` carries the server detail when available.
-    case sessionStartFailed(message: String)
-    /// ``RealtimeSession`` is single-attempt; construct a new session
-    /// instead of starting one twice.
-    case alreadyStarted
-    /// A send was attempted outside an active session.
-    case notConnected
-    /// The transport failed while starting the session (thrown from
-    /// ``RealtimeAgent/start(resumeSessionId:maxSessionSeconds:storeRecording:storeAudio:storeTranscript:storeVideo:micMuted:rpcHandlers:)``). A mid-session transport drop
-    /// does not throw here — it ends the ``RealtimeSession/events`` stream
-    /// with a terminal ``RealtimeSession/Event/sessionEnded(_:)`` instead.
-    case transportError(message: String)
-    /// A caller-supplied payload would violate a wire-protocol
-    /// invariant.
-    case invalidPayload(String)
-    /// Screen share could not be started because the LiveKit
-    /// ``BufferCapturer`` could not be created.
-    case screenShareUnavailable
-    /// A video publish (stream or screen share) is already active on
-    /// this session; remove or stop it before starting another.
-    case videoPublishAlreadyActive
-    /// A caller-owned audio stream is already active on this session;
-    /// remove it before starting another.
-    case audioPublishAlreadyActive
-    /// The base URL is plain `http` to a non-loopback host; a bearer
-    /// credential must not travel over cleartext.
-    case insecureBaseURL(String)
-
-    public var errorDescription: String? {
-        switch self {
-        case .versionMismatch(let detail):
-            return "Realtime protocol version mismatch: \(detail)"
-        case .voiceDisabled:
-            return "Realtime voice is temporarily unavailable."
-        case .handshakeFailed(let status, let code, let detail):
-            let slug = code.map { ", \($0)" } ?? ""
-            if let detail {
-                return "Session start rejected (HTTP \(status)\(slug)): \(detail)"
-            }
-            return "Session start rejected (HTTP \(status)\(slug))."
-        case .sessionStartFailed(let message):
-            return "Session start failed: \(message)"
-        case .alreadyStarted:
-            return "RealtimeSession.start already ran for this session; start a new session instead."
-        case .notConnected:
-            return "RealtimeSession is not connected."
-        case .transportError(let message):
-            return "Realtime transport failed: \(message)"
-        case .invalidPayload(let detail):
-            return "Invalid wire payload: \(detail)"
-        case .screenShareUnavailable:
-            return "Screen share is unavailable: LiveKit BufferCapturer could not be created."
-        case .videoPublishAlreadyActive:
-            return "A video publish is already active on this session; remove or stop it before starting another."
-        case .audioPublishAlreadyActive:
-            return "An audio stream is already active on this session; remove it before starting another."
-        case .insecureBaseURL(let url):
-            return "Realtime base URL must use https (http allowed only for localhost): \(url)"
-        }
-    }
+/// Why the session could not serve the call.
+///
+/// Closed: every one is thrown by this SDK, so it changes only when the SDK
+/// does. Every member is declared in every SDK even where that SDK cannot
+/// reach the case, so a branch written against one ports unchanged.
+public enum SessionStateErrorCode: String, Sendable, Equatable {
+    /// The session is not live. Either it has not reached ``ready`` yet — wait
+    /// for it — or it has already ended, in which case start a new one.
+    case notConnected = "not_connected"
+    /// The session was already started. ``RealtimeSession`` is single-attempt;
+    /// build a new one rather than restarting this one.
+    case alreadyStarted = "already_started"
+    /// A second audio publish was requested while one was live. A session
+    /// carries one voice — the microphone or a caller-owned stream.
+    case audioPublishAlreadyActive = "audio_publish_already_active"
+    /// A second video publish was requested while one was live, so a camera
+    /// stream and a screen share cannot run together.
+    case videoPublishAlreadyActive = "video_publish_already_active"
+    /// Screen capture could not be started by the platform.
+    case screenShareUnavailable = "screen_share_unavailable"
+    /// A caller-supplied payload would violate a wire-protocol invariant.
+    case invalidPayload = "invalid_payload"
 }
+
+/// The session cannot serve this call in its current state.
+///
+/// Thrown from a live-session method rather than at start: a send before
+/// ``ready`` or after the session ended, a second publish on a track that
+/// carries one, a restart of a single-attempt session. ``code`` names which —
+/// switch on it rather than matching the message.
+public struct SessionStateError: RealtimeError, LocalizedError, Sendable, Equatable {
+    /// Why the session refused. A closed set this SDK throws — switch on it.
+    public let code: SessionStateErrorCode
+    /// Human-readable explanation, for logs and display.
+    public let message: String
+
+    /// A state refusal with its cross-SDK code and message.
+    public init(code: SessionStateErrorCode, message: String) {
+        self.code = code
+        self.message = message
+    }
+
+    /// The message, for `LocalizedError` presentation.
+    public var errorDescription: String? { message }
+}
+

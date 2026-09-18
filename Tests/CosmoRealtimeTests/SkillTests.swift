@@ -17,13 +17,16 @@ struct SkillTests {
         #expect(s == Skill(name: "x", description: "d", body: "body"))
     }
     @Test func missingFrontmatterThrows() {
-        #expect(throws: SkillParseError.self) { try parseSkillMd("nope", defaultName: "x") }
+        let error = #expect(throws: SkillError.self) { try parseSkillMd("nope", defaultName: "x") }
+        #expect(error?.code == .missingFrontmatter)
     }
     @Test func missingDescriptionThrows() {
-        #expect(throws: SkillParseError.self) { try parseSkillMd("---\nname: x\n---\nb", defaultName: "x") }
+        let error = #expect(throws: SkillError.self) { try parseSkillMd("---\nname: x\n---\nb", defaultName: "x") }
+        #expect(error?.code == .missingDescription)
     }
     @Test func duplicateKeyThrows() {
-        #expect(throws: SkillParseError.self) { try parseSkillMd("---\ndescription: a\ndescription: b\n---\nx", defaultName: "x") }
+        let error = #expect(throws: SkillError.self) { try parseSkillMd("---\ndescription: a\ndescription: b\n---\nx", defaultName: "x") }
+        #expect(error?.code == .duplicateFrontmatterKey)
     }
     @Test func colonInDescriptionPreserved() throws {
         #expect(try parseSkillMd("---\ndescription: Use this: when X.\n---\nb", defaultName: "x").description == "Use this: when X.")

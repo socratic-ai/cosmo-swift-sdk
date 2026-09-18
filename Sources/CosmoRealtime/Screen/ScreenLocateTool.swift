@@ -1,4 +1,5 @@
 import Foundation
+import os.lock
 
 /// The unadvertised half of the screen surface: the host's answer to "show me
 /// the screen". `cosmo_screen_locate` drives it over RPC — the model never
@@ -10,15 +11,15 @@ import Foundation
 /// `{kind: "screen_locate"}` and the server offers `cosmo_screen_locate` for
 /// the session. There is no public initializer — construct it through
 /// ``AgentTool/screenLocate(capture:)``.
-public final class ScreenLocateTool: @unchecked Sendable {
+final class ScreenLocateTool: @unchecked Sendable {
     /// Server→client RPC method the locator calls; a rename is a wire break.
-    public static let rpcMethod = "screen_capture"
+    static let rpcMethod = "screen_capture"
 
     /// Byte-stream topic the capture payload is published on. Matches the
     /// backend's ``SCREEN_CAPTURE_TOPIC``.
-    public static let byteStreamTopic = "screen_capture"
+    static let byteStreamTopic = "screen_capture"
 
-    /// AX descriptor budgets, matching the backend's `AXElement`. A descriptor
+    /// Descriptor budgets, matching the backend's `ScreenElement`. A descriptor
     /// is a *name* for a click target, so anything longer is a document that
     /// the screenshot already shows; `value` is content rather than identity
     /// and is held tighter. The backend clamps too — capping here keeps the
@@ -27,22 +28,15 @@ public final class ScreenLocateTool: @unchecked Sendable {
     static let labelMaxChars = 512
     static let valueMaxChars = 256
 
-    /// Snapshot the current screen. Throw ``ScreenCaptureUnavailable`` to
-    /// decline benignly; any other throw is an unexpected failure.
-    public typealias Handler = @Sendable () async throws -> ScreenCapture
-
-    /// ``Handler`` told what the caller will actually read, so a host can skip
-    /// building its element list for a pixels-only capture.
-    public typealias RequestHandler = @Sendable (ScreenCaptureRequest) async throws ->
-        ScreenCapture
-
-    private let onCapture: RequestHandler
+    private let onCapture: ScreenCaptureHandler
     private let cache: ScreenCaptureCache
 
-    private let lock = NSLock()
-    private var publish: (@Sendable (Data, String) async throws -> Void)?
+    private let publish =
+        OSAllocatedUnfairLock<(@Sendable (Data, String) async throws -> Void)?>(
+            initialState: nil
+        )
 
-    init(cache: ScreenCaptureCache, onCapture: @escaping RequestHandler) {
+    init(cache: ScreenCaptureCache, onCapture: @escaping ScreenCaptureHandler) {
         self.cache = cache
         self.onCapture = onCapture
     }
@@ -51,7 +45,7 @@ public final class ScreenLocateTool: @unchecked Sendable {
     /// the transport comes up — the payload can only fire once the locator
     /// calls, well after connect, so the late bind never races.
     func bindPublish(_ publish: @escaping @Sendable (Data, String) async throws -> Void) {
-        lock.lock(); self.publish = publish; lock.unlock()
+        self.publish.withLock { $0 = publish }
     }
 
     /// The capture RPC as a handler, registered by wire method name without
@@ -64,20 +58,15 @@ public final class ScreenLocateTool: @unchecked Sendable {
         guard let captureID = args["capture_id"]?.stringValue, !captureID.isEmpty else {
             throw ScreenToolError(message: "\(Self.rpcMethod): missing required 'capture_id'")
         }
-        // Absent means a server older than the hint, which only ever wanted both.
-        let wantsElements = args["want_elements"]?.boolValue ?? true
         let capture: ScreenCapture
         do {
-            capture = try await onCapture(ScreenCaptureRequest(wantsElements: wantsElements))
+            capture = try await onCapture(ScreenCaptureRequest())
         } catch let unavailable as ScreenCaptureUnavailable {
             return ["captured": .bool(false), "message": .string(unavailable.message)]
         }
         cache.put(captureID, capture)
-        let payload = try Self.encodePayload(
-            captureID: captureID, capture: capture, includeElements: wantsElements
-        )
-        lock.lock(); let publish = self.publish; lock.unlock()
-        guard let publish else {
+        let payload = try Self.encodePayload(captureID: captureID, capture: capture)
+        guard let publish = self.publish.withLock({ $0 }) else {
             throw ScreenToolError(message: "\(Self.rpcMethod): byte-stream publish not bound")
         }
         do {
@@ -90,8 +79,14 @@ public final class ScreenLocateTool: @unchecked Sendable {
         return ["captured": .bool(true)]
     }
 
+    /// Truncates to `limit` Unicode scalars — the clamp unit every SDK
+    /// shares (and the one the reply shrinker already counts), so the same
+    /// descriptor clamps to the same text in all three. `prefix(_:)` would
+    /// cut on grapheme clusters and disagree with the sibling SDKs.
     static func clamp(_ text: String, to limit: Int) -> String {
-        text.count > limit ? String(text.prefix(limit)) : text
+        let scalars = text.unicodeScalars
+        guard scalars.count > limit else { return text }
+        return String(String.UnicodeScalarView(scalars.prefix(limit)))
     }
 
     private static func names(_ descriptor: String?) -> Bool {
@@ -100,13 +95,9 @@ public final class ScreenLocateTool: @unchecked Sendable {
     }
 
     /// JSON byte-stream payload the locator's ``ScreenCapturePayload``
-    /// parses: `{capture_id, image_b64, mime_type, ax_elements}`. The server
-    /// also accepts `elements`; this SDK keeps the old spelling until every
-    /// deployed backend has shipped the one that reads both.
-    static func encodePayload(
-        captureID: String, capture: ScreenCapture, includeElements: Bool = true
-    ) throws -> Data {
-        struct AXElementPayload: Encodable {
+    /// parses: `{capture_id, image_b64, mime_type, elements}`.
+    static func encodePayload(captureID: String, capture: ScreenCapture) throws -> Data {
+        struct ElementPayload: Encodable {
             let idx: Int
             let role: String
             let title: String?
@@ -118,9 +109,9 @@ public final class ScreenLocateTool: @unchecked Sendable {
             let capture_id: String
             let image_b64: String
             let mime_type: String
-            let ax_elements: [AXElementPayload]
+            let elements: [ElementPayload]
         }
-        let ax = (includeElements ? capture.elements : []).map { el -> AXElementPayload in
+        let elements = capture.elements.map { el -> ElementPayload in
             let title = el.title.map { clamp($0, to: labelMaxChars) }
             let label = el.label.map { clamp($0, to: labelMaxChars) }
             // Carried only where it is the element's sole name: the grounder
@@ -129,7 +120,7 @@ public final class ScreenLocateTool: @unchecked Sendable {
             // nothing.
             let named = names(title) || names(label)
             let value = named ? nil : el.value.map { clamp($0, to: valueMaxChars) }
-            return AXElementPayload(
+            return ElementPayload(
                 idx: el.index,
                 role: clamp(el.role, to: roleMaxChars),
                 title: title,
@@ -148,7 +139,7 @@ public final class ScreenLocateTool: @unchecked Sendable {
                 capture_id: captureID,
                 image_b64: capture.imageJPEG.base64EncodedString(),
                 mime_type: "image/jpeg",
-                ax_elements: ax
+                elements: elements
             )
         )
     }
@@ -160,7 +151,7 @@ extension AgentTool {
     ///
     /// ```swift
     /// tools: [
-    ///     .screenLocate { try await screenshotAndAccessibilityList() },
+    ///     .screenLocate { _ in try await screenshotAndAccessibilityList() },
     ///     .screenClickElement { request in … },
     ///     .screenHighlightElement { request in … },
     /// ]
@@ -172,19 +163,8 @@ extension AgentTool {
     /// cache, the payload encoding, the byte-stream publish, and the ack.
     /// Your handler owns only the snapshot; throw
     /// ``ScreenCaptureUnavailable`` to decline one benignly.
-    public static func screenLocate(
-        capture: @escaping ScreenLocateTool.Handler
-    ) -> AgentTool {
-        screenLocate(cache: .shared) { _ in try await capture() }
-    }
-
-    /// The screen tool, with the capture handler told what the caller will read
-    /// — see ``ScreenCaptureRequest``. Skipping the element walk when
-    /// ``ScreenCaptureRequest/wantsElements`` is false is what makes a
-    /// pixels-only capture fast; everything else matches
-    /// ``screenLocate(capture:)``.
-    public static func screenLocate(
-        capture: @escaping ScreenLocateTool.RequestHandler
+    static func screenLocate(
+        capture: @escaping ScreenCaptureHandler
     ) -> AgentTool {
         screenLocate(cache: .shared, capture: capture)
     }
@@ -192,15 +172,8 @@ extension AgentTool {
     /// Cache-injecting variant so tests can drive the pairing on their own clock.
     static func screenLocate(
         cache: ScreenCaptureCache,
-        capture: @escaping ScreenLocateTool.RequestHandler
+        capture: @escaping ScreenCaptureHandler
     ) -> AgentTool {
         .screenLocate(ScreenLocateTool(cache: cache, onCapture: capture))
-    }
-
-    static func screenLocate(
-        cache: ScreenCaptureCache,
-        capture: @escaping ScreenLocateTool.Handler
-    ) -> AgentTool {
-        screenLocate(cache: cache) { _ in try await capture() }
     }
 }

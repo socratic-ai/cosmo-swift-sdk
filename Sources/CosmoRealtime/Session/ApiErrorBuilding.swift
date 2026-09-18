@@ -2,22 +2,20 @@ import CosmoRealtimeAPI
 import Foundation
 import OpenAPIRuntime
 
-/// Shared constructor surface for the per-endpoint REST error enums
-/// (``MintTokenError``) so the generated-client error mapping is implemented
-/// once — including by the `CosmoRealtimeMint` target's mint call, hence the
-/// `package` visibility here and on the helpers below.
-package protocol RealtimeRESTError: Error {
+/// Builds the three failures every backend call can produce, so the
+/// generated-client error mapping is written once. Separate from ``ApiError``,
+/// which is what a caller catches: this is the construction side, and only the
+/// per-call types that go through ``RealtimeClient/_run(as:_:)`` adopt it.
+protocol ApiErrorBuilding: ApiError {
     static func rejected(code: String?, detail: String) -> Self
     static func transport(message: String) -> Self
     static func invalidResponse(message: String) -> Self
 }
 
-extension MintTokenError: RealtimeRESTError {}
-
 extension RealtimeClient {
     /// Run one generated call, splitting success-body decode failures from
     /// genuine transport failures (see ``_isSuccessBodyDecodeFailure``).
-    package func _run<Output, Failure: RealtimeRESTError>(
+    func _run<Output, Failure: ApiErrorBuilding>(
         as _: Failure.Type,
         _ call: () async throws -> Output
     ) async throws -> Output {
@@ -31,7 +29,7 @@ extension RealtimeClient {
         }
     }
 
-    package static func _undocumented<Failure: RealtimeRESTError>(
+    static func _undocumented<Failure: ApiErrorBuilding>(
         as _: Failure.Type,
         _ statusCode: Int,
         _ payload: OpenAPIRuntime.UndocumentedPayload
@@ -43,14 +41,14 @@ extension RealtimeClient {
 
     /// Map a documented auth-layer 401. Its body is ``{"detail": "..."}`` —
     /// never the error envelope — so there is no rejection code to parse.
-    package static func _unauthorized<Failure: RealtimeRESTError>(
+    static func _unauthorized<Failure: ApiErrorBuilding>(
         as _: Failure.Type,
         _ detail: String?
     ) -> Failure {
         .rejected(code: nil, detail: detail ?? "HTTP 401")
     }
 
-    package static func _rejected<Failure: RealtimeRESTError>(
+    static func _rejected<Failure: ApiErrorBuilding>(
         as _: Failure.Type,
         _ envelope: Components.Schemas.ErrorEnvelope?
     ) -> Failure {

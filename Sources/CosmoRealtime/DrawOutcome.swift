@@ -19,7 +19,9 @@ public struct DrawOutcome: Sendable, Equatable {
         DrawOutcome(shown: false, reason: reason)
     }
 
+    /// Whether the annotation reached the screen.
     public let shown: Bool
+    /// Why nothing was drawn, model-facing. `nil` when ``shown`` is `true`.
     public let reason: String?
 
     private init(shown: Bool, reason: String?) {

@@ -16,9 +16,9 @@ public enum ClientToolReply {
     /// Added to the top-level result object of a success reply the transport
     /// had to shorten. Its value is `{note, kept_bytes, original_bytes}` —
     /// ``truncationMarkerNote`` plus the serialized size of the result that
-    /// shipped and of the one the handler returned. Under the
-    /// ``AgentTool/sdkToolNamePrefix`` namespace, so it cannot collide
-    /// with a key of the caller's own.
+    /// shipped and of the one the handler returned. Under the reserved
+    /// `cosmo_sdk_` namespace, so it cannot collide with a key of the
+    /// caller's own.
     public static let truncationMarkerKey = "cosmo_sdk_truncated"
 
     /// The instruction the model reads when a result was shortened. Phrased

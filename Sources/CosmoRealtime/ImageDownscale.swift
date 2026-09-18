@@ -34,21 +34,34 @@ public enum ImageDownscale {
     /// Consumers only ever receive one of these, so there is no public
     /// memberwise init to keep compatible.
     public struct Encoded: Sendable, Equatable {
+        /// The encoded frame, base64-encoded and ready to send.
         public let base64: String
+        /// Media type of those bytes.
         public let mimeType: String
+        /// Width of the encoded frame in pixels, after downscaling.
         public let width: Int
+        /// Height of the encoded frame in pixels, after downscaling.
         public let height: Int
     }
 
-    public enum Error: Swift.Error, CustomStringConvertible, LocalizedError, Equatable {
+    /// Why a downscale could not produce a frame to send.
+    public enum Error: RealtimeError, CustomStringConvertible, LocalizedError, Equatable {
+        /// The requested long edge was not a positive number of pixels.
         case invalidLongEdge(Int)
+        /// The requested JPEG quality was outside `0...1`.
         case invalidQuality(Double)
+        /// The image could not be redrawn at the target size.
         case resizeFailed
+        /// The resized image could not be JPEG-encoded.
         case encodeFailed
+        /// The input bytes were not a decodable image.
         case undecodable
+        /// The encoded frame is still over the wire limit. Retry with the
+        /// suggested long edge.
         case payloadTooLarge(base64Length: Int, limit: Int, recommendedLongEdge: Int)
 
-        public var description: String {
+        /// Human-readable explanation of the failure.
+        public var message: String {
             switch self {
             case .invalidLongEdge(let v): return "long-edge must be > 0 (got \(v))"
             case .invalidQuality(let v): return "JPEG quality must be in 0...1 (got \(v))"
@@ -63,7 +76,11 @@ public enum ImageDownscale {
             }
         }
 
-        public var errorDescription: String? { description }
+        /// The message, for string interpolation and `print`.
+        public var description: String { message }
+
+        /// The message, for `LocalizedError` presentation.
+        public var errorDescription: String? { message }
     }
 
     /// Target `(width, height)` for an image of size `(width, height)` such that

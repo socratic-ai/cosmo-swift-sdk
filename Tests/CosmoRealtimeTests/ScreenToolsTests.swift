@@ -14,7 +14,7 @@ enum ScreenFixtures {
                     frame: CGRect(x: Double(i) * 10, y: 0, width: 20, height: 20)
                 )
             },
-            context: ScreenCaptureContext(appPID: 7, windowFrame: nil)
+            context: pid_t(7)
         )
     }
 
@@ -38,12 +38,12 @@ private final class TestClock: @unchecked Sendable {
 }
 
 private func captureSlot(_ tool: AgentTool) -> ScreenLocateTool? {
-    guard case let .screenLocate(slot) = tool else { return nil }
+    guard case let .screenLocate(slot) = tool.payload else { return nil }
     return slot
 }
 
 private func renderer(_ tool: AgentTool) -> ClientToolHandler? {
-    guard case let .sdkClient(spec) = tool else { return nil }
+    guard case let .sdkClient(spec) = tool.payload else { return nil }
     return spec.handler
 }
 
@@ -60,7 +60,7 @@ struct ScreenLocateSlotTests {
         let cache = ScreenCaptureCache()
         let published = Published()
         let slot = try #require(
-            captureSlot(.screenLocate(cache: cache) { ScreenFixtures.capture() })
+            captureSlot(.screenLocate(cache: cache) { _ in ScreenFixtures.capture() })
         )
         slot.bindPublish { data, topic in published.payloads.append((data, topic)) }
 
@@ -75,7 +75,7 @@ struct ScreenLocateSlotTests {
         )
         #expect(json["capture_id"] as? String == "cap1")
         #expect(json["mime_type"] as? String == "image/jpeg")
-        #expect((json["ax_elements"] as? [[String: Any]])?.count == 2)
+        #expect((json["elements"] as? [[String: Any]])?.count == 2)
         #expect(cache.get("cap1")?.elements.count == 2)
     }
 
@@ -92,15 +92,51 @@ struct ScreenLocateSlotTests {
                     frame: CGRect(x: 0, y: 0, width: 20, height: 20)
                 )
             ],
-            context: ScreenCaptureContext(appPID: 7, windowFrame: nil)
+            context: pid_t(7)
         )
 
         let data = try ScreenLocateTool.encodePayload(captureID: "cap1", capture: capture)
         let json = try #require(
             try JSONSerialization.jsonObject(with: data) as? [String: Any]
         )
-        let element = try #require((json["ax_elements"] as? [[String: Any]])?.first)
+        let element = try #require((json["elements"] as? [[String: Any]])?.first)
         #expect((element["value"] as? String)?.count == ScreenLocateTool.valueMaxChars)
+    }
+
+    @Test("descriptor clamps count Unicode scalars — the unit every SDK shares")
+    func descriptorClampsCountScalars() throws {
+        // An astral scalar is one unit (never split); a combining mark is its
+        // own unit — mirrored verbatim in the Python and TypeScript suites.
+        let emojiValue = String(repeating: "\u{1F600}", count: 300)  // 300 scalars
+        let accentTitle = String(repeating: "e\u{0301}", count: 400)  // 800 scalars
+        let capture = ScreenCapture(
+            imageJPEG: Data([0xff, 0xd8]),
+            elements: [
+                ScreenElement(
+                    index: 0, role: "AXButton", title: nil, label: nil,
+                    value: emojiValue,
+                    frame: CGRect(x: 0, y: 0, width: 20, height: 20)
+                ),
+                ScreenElement(
+                    index: 1, role: "AXButton", title: accentTitle, label: nil,
+                    value: nil,
+                    frame: CGRect(x: 0, y: 0, width: 20, height: 20)
+                ),
+            ]
+        )
+
+        let data = try ScreenLocateTool.encodePayload(captureID: "cap-u", capture: capture)
+        let json = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let elements = try #require(json["elements"] as? [[String: Any]])
+        let value = try #require(elements[0]["value"] as? String)
+        let title = try #require(elements[1]["title"] as? String)
+
+        #expect(value.unicodeScalars.count == 256)
+        #expect(value == String(repeating: "\u{1F600}", count: 256))
+        #expect(title.unicodeScalars.count == 512)
+        #expect(title == String(repeating: "e\u{0301}", count: 256))
     }
 
     @Test("a named element ships no value — the screenshot already shows it")
@@ -114,46 +150,20 @@ struct ScreenLocateSlotTests {
                     frame: CGRect(x: 0, y: 0, width: 20, height: 20)
                 )
             ],
-            context: ScreenCaptureContext(appPID: 7, windowFrame: nil)
+            context: pid_t(7)
         )
 
         let data = try ScreenLocateTool.encodePayload(captureID: "cap1", capture: capture)
         let json = try #require(
             try JSONSerialization.jsonObject(with: data) as? [String: Any]
         )
-        let element = try #require((json["ax_elements"] as? [[String: Any]])?.first)
+        let element = try #require((json["elements"] as? [[String: Any]])?.first)
         #expect(element["value"] == nil)
         #expect(element["title"] as? String == "Email")
     }
 
-    @Test("want_elements:false reaches the handler and strips the list from the payload")
-    func pixelsOnlyCaptureSkipsElements() async throws {
-        let published = Published()
-        let asked = Asked()
-        let slot = try #require(
-            captureSlot(
-                .screenLocate(cache: ScreenCaptureCache()) { request in
-                    asked.requests.append(request)
-                    return ScreenFixtures.capture()
-                })
-        )
-        slot.bindPublish { data, topic in published.payloads.append((data, topic)) }
-
-        _ = try await slot.handler()(
-            ["capture_id": .string("cap1"), "want_elements": .bool(false)]
-        )
-
-        #expect(asked.requests == [ScreenCaptureRequest(wantsElements: false)])
-        let sent = try #require(published.payloads.first)
-        let json = try #require(
-            try JSONSerialization.jsonObject(with: sent.data) as? [String: Any]
-        )
-        #expect((json["ax_elements"] as? [[String: Any]])?.isEmpty == true)
-        #expect(json["image_b64"] as? String != nil)
-    }
-
-    @Test("a server that sends no want_elements is answered with the list")
-    func missingWantElementsStillWalks() async throws {
+    @Test("the capture handler receives the request envelope")
+    func handlerReceivesTheRequestEnvelope() async throws {
         let asked = Asked()
         let slot = try #require(
             captureSlot(
@@ -166,14 +176,14 @@ struct ScreenLocateSlotTests {
 
         _ = try await slot.handler()(["capture_id": .string("cap1")])
 
-        #expect(asked.requests == [ScreenCaptureRequest(wantsElements: true)])
+        #expect(asked.requests == [ScreenCaptureRequest()])
     }
 
     @Test("a host that declines to capture says so instead of erroring")
     func unavailableCaptureIsBenign() async throws {
         let slot = try #require(
             captureSlot(
-                .screenLocate(cache: ScreenCaptureCache()) {
+                .screenLocate(cache: ScreenCaptureCache()) { _ in
                     throw ScreenCaptureUnavailable(message: "screen sharing is off")
                 })
         )
@@ -189,7 +199,7 @@ struct ScreenLocateSlotTests {
     func otherCaptureFailuresThrow() async throws {
         struct Boom: Error {}
         let slot = try #require(
-            captureSlot(.screenLocate(cache: ScreenCaptureCache()) { throw Boom() })
+            captureSlot(.screenLocate(cache: ScreenCaptureCache()) { _ in throw Boom() })
         )
         slot.bindPublish { _, _ in }
 

@@ -49,24 +49,26 @@ struct VerifyTests {
         await #expect {
             _ = try await makeStubClient(transport).verify()
         } throws: { error in
-            guard case .rejected(let code, let detail) = error as? VerifyError else { return false }
+            guard let error = error as? VerifyError, error.code == .requestRejected else { return false }
+            let code = error.serverCode
+            let detail = error.message
             return code == nil && detail == "Invalid API key"
         }
     }
 
-    @Test("a 401 without `detail` never reaches the rejection path")
-    func unauthorizedWithoutDetailIsTransport() async {
-        // `detail` is required on the 401 schema, so the generated client
-        // rejects a body without one before ``_unauthorized`` runs. That is
-        // what makes its no-detail fallback unreachable today. If this ever
-        // comes back ``.rejected``, the schema went optional and the fallback
-        // became live text a user can see.
+    @Test("a 401 without `detail` is still a rejection, with the fallback text")
+    func unauthorizedWithoutDetailStillRejects() async {
+        // This call reads the body itself rather than through the generated
+        // client, so a 401 missing the `detail` the schema requires no longer
+        // fails validation first — it is reported as what it is. A 401 is the
+        // server refusing the credential, not the transport failing, and the
+        // caller sees the fallback text, so it is pinned here.
         let transport = StubTransport { jsonResponse(.unauthorized, "{}") }
         await #expect {
             _ = try await makeStubClient(transport).verify()
         } throws: { error in
-            guard case .transport = error as? VerifyError else { return false }
-            return true
+            guard let error = error as? VerifyError, error.code == .requestRejected else { return false }
+            return error.message == "HTTP 401" && error.serverCode == nil
         }
     }
 
@@ -77,7 +79,9 @@ struct VerifyTests {
         await #expect {
             _ = try await makeStubClient(transport).verify()
         } throws: { error in
-            guard case .rejected(let code, let detail) = error as? VerifyError else { return false }
+            guard let error = error as? VerifyError, error.code == .requestRejected else { return false }
+            let code = error.serverCode
+            let detail = error.message
             return code == "workspace_forbidden" && detail.contains("no access")
         }
     }
@@ -88,7 +92,8 @@ struct VerifyTests {
         await #expect {
             _ = try await makeStubClient(transport).verify()
         } throws: { error in
-            guard case .invalidResponse(let message) = error as? VerifyError else { return false }
+            guard let error = error as? VerifyError, error.code == .invalidResponse else { return false }
+            let message = error.message
             return !message.isEmpty
         }
     }
@@ -99,7 +104,8 @@ struct VerifyTests {
         await #expect {
             _ = try await makeStubClient(transport).verify()
         } throws: { error in
-            guard case .transport(let message) = error as? VerifyError else { return false }
+            guard let error = error as? VerifyError, error.code == .requestFailed else { return false }
+            let message = error.message
             return !message.isEmpty
         }
     }

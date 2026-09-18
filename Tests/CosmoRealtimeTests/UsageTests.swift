@@ -61,7 +61,9 @@ struct UsageTests {
         await #expect {
             _ = try await makeStubClient(transport).sessionUsage(sessionId: "sess-1")
         } throws: { error in
-            guard case .rejected(let code, let detail) = error as? UsageError else { return false }
+            guard let error = error as? UsageError, error.code == .requestRejected else { return false }
+            let code = error.serverCode
+            let detail = error.message
             return code == "not_found" && detail.contains("not found")
         }
     }
@@ -73,7 +75,9 @@ struct UsageTests {
         await #expect {
             _ = try await makeStubClient(transport).sessionUsage(sessionId: "sess-1")
         } throws: { error in
-            guard case .rejected(let code, let detail) = error as? UsageError else { return false }
+            guard let error = error as? UsageError, error.code == .requestRejected else { return false }
+            let code = error.serverCode
+            let detail = error.message
             return code == nil && detail == "Invalid API key"
         }
     }
@@ -84,7 +88,8 @@ struct UsageTests {
         await #expect {
             _ = try await makeStubClient(transport).sessionUsage(sessionId: "sess-1")
         } throws: { error in
-            guard case .invalidResponse(let message) = error as? UsageError else { return false }
+            guard let error = error as? UsageError, error.code == .invalidResponse else { return false }
+            let message = error.message
             return !message.isEmpty
         }
     }
@@ -95,7 +100,8 @@ struct UsageTests {
         await #expect {
             _ = try await makeStubClient(transport).sessionUsage(sessionId: "sess-1")
         } throws: { error in
-            guard case .transport(let message) = error as? UsageError else { return false }
+            guard let error = error as? UsageError, error.code == .requestFailed else { return false }
+            let message = error.message
             return !message.isEmpty
         }
     }

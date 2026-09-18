@@ -4,17 +4,17 @@ import OSLog
 /// One listed MCP tool: its name, optional description, and the raw JSON text
 /// of its `inputSchema` (re-serialized so it can pass through as a
 /// ``DeclaredClientTool`` parameters schema).
-public struct MCPToolInfo: Sendable, Equatable {
-    public let name: String
-    public let description: String?
-    public let inputSchemaJSON: String?
+struct MCPToolInfo: Sendable, Equatable {
+    let name: String
+    let description: String?
+    let inputSchemaJSON: String?
 }
 
 /// The result of a `tools/call`, flattened for the reply envelope.
-public struct MCPCallResult: Sendable, Equatable {
-    public let isError: Bool
-    public let text: String
-    public let structuredJSON: String?
+struct MCPCallResult: Sendable, Equatable {
+    let isError: Bool
+    let text: String
+    let structuredJSON: String?
 }
 
 /// A live MCP session over a ``MCPTransport``. Actor-isolated, so calls to one
@@ -46,7 +46,7 @@ actor MCPConnection {
             let rawTools = obj["tools"] as? [[String: Any]]
         else {
             let preview = String(resultJSON.prefix(200))
-            throw MCPError.transport("MCP '\(name)': tools/list result not the expected shape: \(preview)")
+            throw McpError(code: .invalidResponse, message: "MCP '\(name)': tools/list result not the expected shape: \(preview)")
         }
         return rawTools.compactMap { raw in
             guard let name = raw["name"] as? String else { return nil }
@@ -72,7 +72,7 @@ actor MCPConnection {
         let params = String(decoding: paramsData, as: UTF8.self)
         let resultJSON = try await transport.request(method: "tools/call", paramsJSON: params)
         guard let obj = (try? JSONSerialization.jsonObject(with: Data(resultJSON.utf8))) as? [String: Any] else {
-            throw MCPError.transport("MCP '\(server)': tools/call response failed to parse: \(resultJSON.prefix(200))")
+            throw McpError(code: .invalidResponse, message: "MCP '\(server)': tools/call response failed to parse: \(resultJSON.prefix(200))")
         }
         let isError = obj["isError"] as? Bool ?? false
         let blocks = obj["content"] as? [[String: Any]] ?? []

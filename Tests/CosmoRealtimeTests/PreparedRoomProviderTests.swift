@@ -13,11 +13,11 @@ struct PreparedRoomProviderTests {
 
     private struct StubProvider: PreparedRoomProviding {
         let room: PreparedRoom
-        func takePreparedRoom(for options: RealtimeClient.Options) -> PreparedRoom? { room }
+        func takePreparedRoom(for client: RealtimeClient) -> PreparedRoom? { room }
     }
 
-    private static func makeOptions() -> RealtimeClient.Options {
-        RealtimeClient.Options(
+    private static func makeClient() -> RealtimeClient {
+        RealtimeClient(
             credential: .apiKey("key"), baseURL: URL(string: "https://api.example.com")!
         )
     }
@@ -38,14 +38,14 @@ struct PreparedRoomProviderTests {
     }
 
     @Test func noProviderInstalledYieldsNoPreparedRoom() {
-        #expect(RealtimeSession._takePreparedRoom(for: Self.makeOptions()) == nil)
+        #expect(RealtimeSession._takePreparedRoom(for: Self.makeClient()) == nil)
     }
 
     @Test func installedProviderSuppliesItsRoom() throws {
         defer { RealtimeSession._setPreparedRoomProvider(nil) }
         let room = Self.makeRoom()
         RealtimeSession._setPreparedRoomProvider(StubProvider(room: room))
-        let taken = try #require(RealtimeSession._takePreparedRoom(for: Self.makeOptions()))
+        let taken = try #require(RealtimeSession._takePreparedRoom(for: Self.makeClient()))
         #expect(taken.roomName == room.roomName)
         #expect(taken.room === room.room)
     }
@@ -53,6 +53,6 @@ struct PreparedRoomProviderTests {
     @Test func clearingTheProviderRestoresTheSerializedPath() {
         RealtimeSession._setPreparedRoomProvider(StubProvider(room: Self.makeRoom()))
         RealtimeSession._setPreparedRoomProvider(nil)
-        #expect(RealtimeSession._takePreparedRoom(for: Self.makeOptions()) == nil)
+        #expect(RealtimeSession._takePreparedRoom(for: Self.makeClient()) == nil)
     }
 }

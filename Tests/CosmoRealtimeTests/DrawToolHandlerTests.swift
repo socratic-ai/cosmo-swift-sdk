@@ -110,7 +110,7 @@ struct DrawToolHandlerTests {
             parameters: [:],
             handler: { _ in [:] }
         )
-        #expect(throws: RealtimeSessionError.self) {
+        #expect(throws: SessionStateError.self) {
             try SessionConfig(tools: [squatter]).assertNoReservedToolNames()
         }
     }
@@ -144,7 +144,7 @@ struct DrawToolHandlerTests {
             parameters: [:],
             handler: { _, _ in }
         )
-        #expect(throws: RealtimeSessionError.self) {
+        #expect(throws: SessionStateError.self) {
             try SessionConfig(tools: [squatter]).assertNoReservedToolNames()
         }
     }
@@ -158,10 +158,11 @@ struct DrawToolHandlerTests {
             .drawPoint { _ in .shown },
             .client(name: "t", description: "d", parameters: [:], handler: { _ in [:] }),
             .backgroundClient(name: "b", description: "d", parameters: [:], handler: { _, _ in }),
-            .webSearch, .examineImage, .detectObjects, .pointAtObject,
+            .webSearchTool(), .examineImageTool(), .detectObjectsTool(), .pointAtObjectTool(),
+            .endCallTool(),
         ]
         for tool in tools {
-            #expect(tool == tool, "\(tool.name) is not equal to itself")
+            #expect(tool == tool, "\(tool.payload.name) is not equal to itself")
         }
     }
 
@@ -201,7 +202,7 @@ struct DrawToolHandlerTests {
                 parameters: [:], handler: { _, _ in }
             ),
         ] {
-            #expect(throws: RealtimeSessionError.self) {
+            #expect(throws: SessionStateError.self) {
                 try SessionConfig(tools: [squatter]).assertNoReservedToolNames()
             }
         }

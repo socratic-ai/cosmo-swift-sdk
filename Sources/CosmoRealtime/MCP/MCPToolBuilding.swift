@@ -3,14 +3,10 @@ import Foundation
 let mcpMaxNameLength = 64
 let mcpMaxToolCount = 64
 
-public struct SkippedTool: Sendable, Equatable {
-    public let server: String
-    public let tool: String
-    public let reason: String
-}
-
-enum MCPToolError: Error, Equatable {
-    case toolError(String)
+struct SkippedTool: Sendable, Equatable {
+    let server: String
+    let tool: String
+    let reason: String
 }
 
 typealias MCPCall = @Sendable (_ originalName: String, _ argsJSON: String) async throws -> MCPCallResult
@@ -85,7 +81,7 @@ func normalizedSchema(_ inputSchemaJSON: String?) -> [String: JSONValue]? {
 
 func mcpResultObject(from result: MCPCallResult) throws -> [String: JSONValue] {
     if result.isError {
-        throw MCPToolError.toolError(result.text.isEmpty ? "MCP tool reported an error" : result.text)
+        throw McpError(code: .toolError, message: result.text.isEmpty ? "MCP tool reported an error" : result.text)
     }
     if let structuredJSON = result.structuredJSON, let obj = jsonObject(fromJSON: structuredJSON) {
         return obj

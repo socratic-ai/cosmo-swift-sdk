@@ -18,20 +18,20 @@ extension LiveKitSessionTransport {
     /// Idempotent: if a screen-share is already running, the existing
     /// track is unpublished first before creating a new one.
     ///
-    /// Throws ``RealtimeSessionError/notConnected`` if no room is open —
+    /// Throws ``SessionStateError`` if no room is open —
     /// without this guard the track is created and frames are captured
     /// into a sink that never publishes, which presents as a silent
     /// failure to the caller.
     func startScreenShare() async throws {
         guard room != nil else {
-            throw RealtimeSessionError.notConnected
+            throw SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.")
         }
         if let current = screenShareLock.withLock({ $0 }) {
             // Replacing a prior share is the documented idempotence; a live
             // video stream is someone else's publish — refuse rather than
             // silently tearing it down.
             guard current.source == .screenShareVideo else {
-                throw RealtimeSessionError.videoPublishAlreadyActive
+                throw SessionStateError(code: .videoPublishAlreadyActive, message: "A video publish is already active on this session; remove or stop it before starting another.")
             }
             await stopScreenShare()
         }
@@ -45,14 +45,14 @@ extension LiveKitSessionTransport {
     /// under LiveKit's camera source — the transport encoding of "not
     /// the user's screen" — with the same deferred-publish contract as
     /// ``startScreenShare``. One video publish at a time: throws
-    /// ``RealtimeSessionError/videoPublishAlreadyActive`` while any
+    /// ``SessionStateError`` while any
     /// video publish (stream or share) is live.
     func addVideoStream() async throws -> VideoStreamHandle {
         guard room != nil else {
-            throw RealtimeSessionError.notConnected
+            throw SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.")
         }
         guard screenShareLock.withLock({ $0 }) == nil else {
-            throw RealtimeSessionError.videoPublishAlreadyActive
+            throw SessionStateError(code: .videoPublishAlreadyActive, message: "A video publish is already active on this session; remove or stop it before starting another.")
         }
         let state = try createVideoPublishState(
             name: Track.cameraName, source: .camera
@@ -80,7 +80,7 @@ extension LiveKitSessionTransport {
             options: BufferCaptureOptions()
         )
         guard let capturer = track.capturer as? BufferCapturer else {
-            throw RealtimeSessionError.screenShareUnavailable
+            throw SessionStateError(code: .screenShareUnavailable, message: "Screen share is unavailable: LiveKit BufferCapturer could not be created.")
         }
         let state = ScreenShareState(track: track, capturer: capturer, source: source)
         screenShareLock.withLock { $0 = state }

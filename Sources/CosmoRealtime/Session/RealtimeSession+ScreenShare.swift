@@ -8,10 +8,18 @@ extension RealtimeSession {
     /// immediately but the SFU publish is deferred until the first
     /// ``pushScreenShareFrame(_:)`` arrives, since the capturer needs at
     /// least one frame to resolve dimensions. Idempotent: any prior
-    /// share is stopped first. Throws ``RealtimeSessionError/notConnected``
-    /// if the session is not live.
+    /// share is stopped first. Throws ``SessionStateError``
+    /// if the session is not live. On the websocket transport, which
+    /// carries no video, throws
+    /// ``SessionStartError`` whose message
+    /// opens with the rejection code `video_unsupported`.
     public func startScreenShare() async throws {
-        try await transport.startScreenShare()
+        do {
+            try await transport.startScreenShare()
+        } catch SessionStartFailure.unsupportedCapability(let code, let detail) {
+            Self.log.error("startScreenShare refused code=\(code, privacy: .public)")
+            throw SessionStartError(code: .config, message: detail, serverCode: code)
+        }
     }
 
     /// Push one captured frame into the active screen-share publish.
@@ -54,12 +62,20 @@ extension RealtimeSession {
     /// caller feeds captured ``CMSampleBuffer``s into. The publish is
     /// deferred until the first pushed frame, same as
     /// ``startScreenShare()``. One video publish at a time: throws
-    /// ``RealtimeSessionError/videoPublishAlreadyActive`` while another
+    /// ``SessionStateError`` while another
     /// video publish (stream or share) is live, and
-    /// ``RealtimeSessionError/notConnected`` outside a live session.
+    /// ``SessionStateError`` outside a live session.
+    /// On the websocket transport, which carries no video, throws
+    /// ``SessionStartError`` whose message
+    /// opens with the rejection code `video_unsupported`.
     /// Publish failures surface on ``onScreenShareFailed(_:)``.
     public func addVideoStream() async throws -> VideoStreamHandle {
-        try await transport.addVideoStream()
+        do {
+            return try await transport.addVideoStream()
+        } catch SessionStartFailure.unsupportedCapability(let code, let detail) {
+            Self.log.error("addVideoStream refused code=\(code, privacy: .public)")
+            throw SessionStartError(code: .config, message: detail, serverCode: code)
+        }
     }
 
     /// Remove a video stream added by ``addVideoStream()``. Identity-keyed

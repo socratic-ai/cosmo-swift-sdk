@@ -17,6 +17,8 @@ public enum MicPrewarmCoordinator {
         try await RealtimeSession.setRecordingAlwaysPrepared($0)
     }
 
+    /// Queue a prewarm (`true`) or release (`false`). Returns at once; the
+    /// transition runs behind any still in flight, so the last call wins.
     public static func set(_ enabled: Bool) {
         let prior = pending
         pending = Task {

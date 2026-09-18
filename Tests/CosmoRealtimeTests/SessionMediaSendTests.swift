@@ -252,7 +252,7 @@ struct SessionMediaSendTests {
     @Test("send(bytes:) throws notConnected before start")
     func sendBytesRejectsBeforeStart() async {
         let session = RealtimeSession(transport: FakeSessionTransport())
-        await #expect(throws: RealtimeSessionError.notConnected) {
+        await #expect(throws: SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.")) {
             try await session.send(bytes: Data("x".utf8), topic: "t")
         }
     }
@@ -273,10 +273,10 @@ struct SessionMediaSendTests {
     @Test("media sends throw notConnected before start")
     func mediaSendsRejectBeforeStart() async {
         let session = RealtimeSession(transport: FakeSessionTransport())
-        await #expect(throws: RealtimeSessionError.notConnected) {
+        await #expect(throws: SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.")) {
             try await session.send(image: "YWJj")
         }
-        await #expect(throws: RealtimeSessionError.notConnected) {
+        await #expect(throws: SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.")) {
             try await session.sendActivityEnd()
         }
     }
@@ -285,10 +285,10 @@ struct SessionMediaSendTests {
     func mediaSendsRejectAfterEnd() async throws {
         let (session, _) = try await startedSession()
         await session.end()
-        await #expect(throws: RealtimeSessionError.notConnected) {
+        await #expect(throws: SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.")) {
             try await session.send(image: "YWJj")
         }
-        await #expect(throws: RealtimeSessionError.notConnected) {
+        await #expect(throws: SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.")) {
             try await session.sendActivityEnd()
         }
     }

@@ -3,7 +3,7 @@ import Testing
 @testable import CosmoRealtime
 
 /// The impure layer of zero-argument credential resolution: path selection,
-/// file reading, and what the resolving ``RealtimeClient/Options`` init does
+/// file reading, and what the resolving ``RealtimeClient`` init does
 /// with the result. Chain semantics are pinned by the shared vectors
 /// (``CredentialsResolutionConformanceTests``).
 @Suite struct CredentialsFileTests {
@@ -34,32 +34,31 @@ import Testing
 
     @Test func optionsInitAdoptsFileCredentialAndBaseURL() throws {
         try withTemporaryFile(Self.validFile) { path in
-            let options = try RealtimeClient.Options(
+            let client = try RealtimeClient(
                 environment: ["COSMO_CREDENTIALS_FILE": path]
             )
-            #expect(options.credential == .apiKey("cosmo_file_key"))
-            #expect(options.baseURL == URL(string: "https://app.askcosmo.ai")!)
-            #expect(options.canMint)
+            #expect(client.credential == .apiKey("cosmo_file_key"))
+            #expect(client.baseURL == URL(string: "https://app.askcosmo.ai")!)
         }
     }
 
     @Test func optionsInitPrefersEnvKeyAndKeepsDefaultBase() throws {
         try withTemporaryFile(Self.validFile) { path in
-            let options = try RealtimeClient.Options(
+            let client = try RealtimeClient(
                 environment: [
                     "COSMO_CREDENTIALS_FILE": path,
                     "COSMO_API_KEY": "cosmo_env_key",
                 ]
             )
-            #expect(options.credential == .apiKey("cosmo_env_key"))
-            #expect(options.baseURL == RealtimeBaseURL.productionBaseURL)
+            #expect(client.credential == .apiKey("cosmo_env_key"))
+            #expect(client.baseURL == RealtimeBaseURL.productionBaseURL)
         }
     }
 
     @Test func optionsInitConflictingEnvBaseURLIsRefused() throws {
         try withTemporaryFile(Self.validFile) { path in
             do {
-                _ = try RealtimeClient.Options(
+                _ = try RealtimeClient(
                     environment: [
                         "COSMO_CREDENTIALS_FILE": path,
                         "COSMO_BASE_URL": "http://localhost:8123",
@@ -67,7 +66,7 @@ import Testing
                 )
                 Issue.record("expected CredentialsError.baseURLMismatch")
             } catch let error as CredentialsError {
-                #expect(error.code == "base_url_mismatch")
+                #expect(error.code == .baseURLMismatch)
                 let message = error.errorDescription ?? ""
                 #expect(message.contains("http://localhost:8123"))
                 #expect(message.contains("https://app.askcosmo.ai"))
@@ -77,29 +76,29 @@ import Testing
 
     @Test func optionsInitMatchingEnvBaseURLResolves() throws {
         try withTemporaryFile(Self.validFile) { path in
-            let options = try RealtimeClient.Options(
+            let client = try RealtimeClient(
                 environment: [
                     "COSMO_CREDENTIALS_FILE": path,
                     "COSMO_BASE_URL": "https://app.askcosmo.ai/",
                 ]
             )
-            #expect(options.baseURL == URL(string: "https://app.askcosmo.ai")!)
+            #expect(client.baseURL == URL(string: "https://app.askcosmo.ai")!)
         }
     }
 
     @Test func optionsInitWithNothingToResolveThrowsNotFound() throws {
         try withTemporaryFile(nil) { path in
             #expect(throws: CredentialsError.self) {
-                _ = try RealtimeClient.Options(
+                _ = try RealtimeClient(
                     environment: ["COSMO_CREDENTIALS_FILE": path]
                 )
             }
             do {
-                _ = try RealtimeClient.Options(
+                _ = try RealtimeClient(
                     environment: ["COSMO_CREDENTIALS_FILE": path]
                 )
             } catch let error as CredentialsError {
-                #expect(error.code == "no_credential")
+                #expect(error.code == .noCredential)
                 let message = error.errorDescription ?? ""
                 #expect(message.contains("COSMO_API_KEY"))
                 #expect(message.contains("cosmo login"))
@@ -114,12 +113,12 @@ import Testing
         )
         try withTemporaryFile(expired) { path in
             do {
-                _ = try RealtimeClient.Options(
+                _ = try RealtimeClient(
                     environment: ["COSMO_CREDENTIALS_FILE": path]
                 )
                 Issue.record("expected CredentialsError.expired")
             } catch let error as CredentialsError {
-                #expect(error.code == "expired")
+                #expect(error.code == .expired)
                 #expect((error.errorDescription ?? "").contains("cosmo login"))
             }
         }
@@ -131,7 +130,7 @@ import Testing
     }
 
     @Test func explicitCredentialInitsAreUntouchedByEnvironment() {
-        let options = RealtimeClient.Options(apiKey: "cosmo_explicit")
-        #expect(options.credential == .apiKey("cosmo_explicit"))
+        let client = RealtimeClient(apiKey: "cosmo_explicit")
+        #expect(client.credential == .apiKey("cosmo_explicit"))
     }
 }

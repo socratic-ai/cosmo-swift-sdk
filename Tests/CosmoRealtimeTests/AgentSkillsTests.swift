@@ -15,7 +15,7 @@ struct AgentSkillsTests {
     }
 
     private func toolNames(_ cfg: SessionConfig) -> [String] {
-        (cfg.tools ?? []).map(\.name)
+        (cfg.tools ?? []).map(\.payload.name)
     }
 
     private let refundsMenu =
@@ -105,7 +105,7 @@ struct AgentSkillsTests {
         let agent = try RealtimeAgent(skills: [hotSkill("refunds")])
         var handler: ClientToolHandler?
         let s = try await agent.start(config: SessionConfig(), transportFactory: { _ in FakeMCPTransport() }) { cfg in
-            if case let .sdkClient(tool)? = (cfg.tools ?? []).first { handler = tool.handler }
+            if case let .sdkClient(tool)? = (cfg.tools ?? []).first?.payload { handler = tool.handler }
             return try await self.fakeRealtime(cfg)
         }
         let out = try await handler?(["name": .string("refunds")])
@@ -119,7 +119,7 @@ struct AgentSkillsTests {
         )
         let agent = try RealtimeAgent(
             skills: [hotSkill("refunds")],
-            mcp: McpRegistry(servers: [McpStdioServer(name: "fs", command: "x")])
+            mcp: [McpStdioServer(name: "fs", command: "x")]
         )
         let mcpFactory: MCPTransportFactory = { _ in
             FakeMCPTransport(responses: ["tools/list": #"{"tools":[{"name":"read","inputSchema":{"type":"object"}}]}"#])
@@ -143,7 +143,7 @@ struct AgentSkillsTests {
         )
         let agent = try RealtimeAgent(
             skills: [hotSkill("refunds")],
-            mcp: McpRegistry(servers: [McpStdioServer(name: "fs", command: "x")])
+            mcp: [McpStdioServer(name: "fs", command: "x")]
         )
         let mcpFactory: MCPTransportFactory = { _ in
             FakeMCPTransport(responses: ["tools/list": #"{"tools":[{"name":"read","inputSchema":{"type":"object"}}]}"#])
@@ -166,7 +166,7 @@ struct AgentSkillsTests {
         let defaultTool = AgentTool.client(
             name: "mcp__fs__read", description: "d", parameters: ["type": .string("object")], handler: { _ in [:] }
         )
-        let agent = try RealtimeAgent(mcp: McpRegistry(servers: [McpStdioServer(name: "fs", command: "x")]))
+        let agent = try RealtimeAgent(mcp: [McpStdioServer(name: "fs", command: "x")])
         let mcpFactory: MCPTransportFactory = { _ in
             FakeMCPTransport(responses: ["tools/list": #"{"tools":[{"name":"read","inputSchema":{"type":"object"}}]}"#])
         }
@@ -197,7 +197,7 @@ struct AgentSkillsTests {
                 try await self.fakeRealtime(cfg)
             }
         } throws: { error in
-            guard let error = error as? RealtimeSessionError else { return false }
+            guard let error = error as? SessionStartError else { return false }
             return (error.errorDescription ?? "").contains("reserved")
         }
     }

@@ -1,14 +1,67 @@
 import Foundation
 import os
 
+/// Why a ``TokenSource`` could not produce a token.
+///
+/// Closed: every one is raised by this SDK. The token endpoint's own
+/// rejection slug is open and rides on ``TokenSourceError/serverCode``.
+public enum TokenSourceErrorCode: String, Sendable, Equatable {
+    /// The token endpoint did not produce a usable answer — it could not be
+    /// reached, or it answered with a redirect, which is refused rather than
+    /// followed.
+    case requestFailed = "request_failed"
+    /// The endpoint refused. ``TokenSourceError/serverCode`` carries its own
+    /// slug for why.
+    case requestRejected = "request_rejected"
+    /// The endpoint answered without a usable token.
+    case invalidResponse = "invalid_response"
+    /// A custom fetcher returned an empty JWT. An error the closure itself
+    /// throws propagates unchanged rather than becoming this code.
+    case fetcherFailed = "fetcher_failed"
+}
+
+/// A ``TokenSource`` could not produce a token.
+///
+/// Raised while the SDK obtains a credential for itself, which happens
+/// beneath every authenticated call — ``RealtimeClient/verify()``,
+/// ``RealtimeClient/mintToken(_:ttlSeconds:)``, session start,
+/// dial and usage reads all resolve the source first, and it re-resolves on
+/// expiry and after a 401. So this surfaces from whichever call needed a
+/// token, not from one operation.
+///
+/// ``code`` names what this SDK saw; ``serverCode`` carries the token
+/// endpoint's own slug when ``code`` is
+/// ``TokenSourceErrorCode/requestRejected``.
+public struct TokenSourceError: ApiError, LocalizedError, Equatable {
+    /// How far the fetch got. A closed set this SDK raises — switch on it.
+    public let code: TokenSourceErrorCode
+    /// Human-readable explanation, for logs and display.
+    public let message: String
+    /// The token endpoint's own rejection slug when it sent one. An open set:
+    /// log it, do not switch on it.
+    public let serverCode: String?
+
+    /// Creates a token-source error.
+    public init(code: TokenSourceErrorCode, message: String, serverCode: String? = nil) {
+        self.code = code
+        self.message = message
+        self.serverCode = serverCode
+    }
+
+    /// The message, for `LocalizedError` presentation.
+    /// The message, for `LocalizedError` presentation.
+    /// The message, for `LocalizedError` presentation.
+    public var errorDescription: String? { message }
+}
+
 /// A credential that fetches — and keeps fresh — a minted end-user token.
 ///
 /// A shipped app must not hold an API key, and a static minted JWT expires
 /// after 24 hours. A ``TokenSource`` closes the gap: it knows how to fetch a
 /// fresh ``MintedToken`` from the developer's own backend, caches it in
-/// memory, and re-fetches when the cached token nears expiry — so options
-/// built with ``RealtimeClient/Options/init(tokenSource:baseURL:connectTimeout:requestTimeout:verifyTLS:)``
-/// stay valid for the life of the process with no refresh code in the app.
+/// memory, and re-fetches when the cached token nears expiry — so a client
+/// built with ``RealtimeClient/init(tokenSource:baseURL:connectTimeout:requestTimeout:verifyTLS:transport:)``
+/// stays valid for the life of the process with no refresh code in the app.
 ///
 /// The session asks the source for a JWT whenever a request needs auth; the
 /// source reuses its cached token while comfortably within its lifetime and
@@ -31,11 +84,6 @@ public final class TokenSource: Sendable {
     /// contract (``token-source-vectors.json``).
     static let refreshSkew: TimeInterval = 60
 
-    /// The error slug for failures detected on this side of the wire —
-    /// transport, a non-JSON body, a missing ``jwt`` / ``expires_at``. A
-    /// parseable server rejection keeps the server's slug instead.
-    static let failedCode = "token_source_failed"
-
     private let store: Store
 
     init(
@@ -51,21 +99,43 @@ public final class TokenSource: Sendable {
     /// template (``expiresAt``, the serialized ``MintedToken`` spelling,
     /// is accepted too). ``headers`` carry the app's own auth (its
     /// session cookie, a bearer, a shared secret). Rejections surface as
-    /// ``MintTokenError/rejected(code:detail:)`` carrying the server's
-    /// error slug when the body parses, else a synthetic ``http_<status>``;
-    /// local failures carry ``token_source_failed``. Throws that same
-    /// error for a plain-http ``url`` to a non-loopback host — auth
-    /// headers and JWTs must not cross the network in the clear. Redirects
-    /// are refused for the same reason: the exchange never leaves ``url``.
+    /// ``TokenSourceError`` carrying the server's error slug on
+    /// ``TokenSourceError/serverCode`` when the body parses, else a
+    /// synthetic ``http_<status>``. Throws for a plain-http ``url`` to a
+    /// non-loopback host — auth headers and JWTs must not cross the network
+    /// in the clear. Redirects are refused for the same reason: the
+    /// exchange never leaves ``url``.
     public static func endpoint(_ url: URL, headers: [String: String] = [:]) throws -> TokenSource {
+        try _assertSupportedEndpointURL(url)
+        return TokenSource(fetchToken: { try await _postTokenEndpoint(url: url, headers: headers) })
+    }
+
+    /// Like ``endpoint(_:headers:)`` with the headers resolved per fetch —
+    /// for a rotating credential (a fresh session cookie or bearer each
+    /// request). The closure runs before every token POST; an error it
+    /// throws surfaces from whichever call needed the token, and nothing
+    /// is sent.
+    public static func endpoint(
+        _ url: URL,
+        headers: @escaping @Sendable () async throws -> [String: String]
+    ) throws -> TokenSource {
+        try _assertSupportedEndpointURL(url)
+        return TokenSource(
+            fetchToken: { try await _postTokenEndpoint(url: url, headers: headers()) }
+        )
+    }
+
+    private static func _assertSupportedEndpointURL(_ url: URL) throws {
         guard _isSupportedEndpointURL(url) else {
-            throw MintTokenError.rejected(
-                code: failedCode,
-                detail: "TokenSource.endpoint must use https (http is allowed only for "
+            // Refused before any request, so this is a credential the SDK will
+            // not send rather than a request that failed — the same code the
+            // sibling SDKs report for it.
+            throw CredentialsError(
+                code: .insecureBaseURL,
+                message: "TokenSource.endpoint must use https (http is allowed only for "
                     + "localhost): \(url.absoluteString)"
             )
         }
-        return TokenSource(fetchToken: { try await _postTokenEndpoint(url: url, headers: headers) })
     }
 
     /// Only ``https``, or ``http`` specifically to a loopback host — any
@@ -79,11 +149,21 @@ public final class TokenSource: Sendable {
     }
 
     /// A source backed by ``fetchToken`` — called whenever a fresh token is
-    /// needed, returning the ``MintedToken`` to use.
+    /// needed, returning the ``MintedToken`` to use. A token with an empty
+    /// ``MintedToken/jwt`` raises ``TokenSourceError``.
     public static func custom(
         _ fetchToken: @escaping @Sendable () async throws -> MintedToken
     ) -> TokenSource {
-        TokenSource(fetchToken: fetchToken)
+        TokenSource(fetchToken: {
+            let minted = try await fetchToken()
+            guard !minted.jwt.isEmpty else {
+                throw TokenSourceError(
+                    code: .fetcherFailed,
+                    message: "TokenSource.custom fetcher must return a non-empty jwt."
+                )
+            }
+            return minted
+        })
     }
 
     /// The JWT to send right now: cached while it has more than the refresh
@@ -162,14 +242,14 @@ public final class TokenSource: Sendable {
                 for: request, delegate: RedirectRefusingDelegate()
             )
         } catch {
-            throw MintTokenError.rejected(
-                code: failedCode,
-                detail: "token endpoint request failed: \(error.localizedDescription)"
+            throw TokenSourceError(
+                code: .requestFailed,
+                message: "token endpoint request failed: \(error.localizedDescription)"
             )
         }
         guard let http = response as? HTTPURLResponse else {
-            throw MintTokenError.rejected(
-                code: failedCode, detail: "token endpoint: non-HTTP response"
+            throw TokenSourceError(
+                code: .invalidResponse, message: "token endpoint: non-HTTP response"
             )
         }
         return try _decodeEndpointResponse(
@@ -197,87 +277,40 @@ public final class TokenSource: Sendable {
     }
 
     /// Map one endpoint response onto a ``MintedToken`` or a
-    /// ``MintTokenError``: a 30x (delivered un-followed by
-    /// ``RedirectRefusingDelegate``) and a 2xx body that is not JSON or is
-    /// missing ``jwt`` / ``expires_at`` surface as ``token_source_failed``;
-    /// any other non-2xx keeps the server's error slug when the rejection
-    /// body parses (else a synthetic ``http_<status>``).
+    /// ``TokenSourceError``: a 30x (delivered un-followed by
+    /// ``RedirectRefusingDelegate``) is a refused request; a 2xx body that is
+    /// not JSON or is missing ``jwt`` / ``expires_at`` is an invalid
+    /// response; any other non-2xx is a rejection keeping the server's error
+    /// slug when the body parses (else a synthetic ``http_<status>``).
     static func _decodeEndpointResponse(
         status: Int, data: Data, location: String? = nil
     ) throws -> MintedToken {
         if (300..<400).contains(status) {
             let target = location.map { " → \($0)" } ?? ""
-            throw MintTokenError.rejected(
-                code: failedCode,
-                detail: "Token endpoint redirected (HTTP \(status)\(target)); redirects are "
+            throw TokenSourceError(
+                code: .requestFailed,
+                message: "Token endpoint redirected (HTTP \(status)\(target)); redirects are "
                     + "refused so the exchange cannot leave the configured origin."
             )
         }
         guard (200..<300).contains(status) else {
-            let (code, message) = _parseErrorDetail(status: status, data: data)
+            let (code, message) = parseErrorDetail(status: status, data: data)
             log.warning(
                 "token source rejected status=\(status, privacy: .public) code=\(code, privacy: .public)"
             )
-            throw MintTokenError.rejected(code: code, detail: message)
+            throw TokenSourceError(code: .requestRejected, message: message, serverCode: code)
         }
         guard
             let decoded = try? JSONDecoder().decode(EndpointResponse.self, from: data),
             !decoded.jwt.isEmpty,
             let expiresAt = parseExpiresAt(decoded.expiresAt)
         else {
-            throw MintTokenError.rejected(
-                code: failedCode, detail: "Token endpoint response missing jwt / expires_at."
+            throw TokenSourceError(
+                code: .invalidResponse,
+                message: "Token endpoint response missing jwt / expires_at."
             )
         }
         return MintedToken(jwt: decoded.jwt, expiresAt: expiresAt)
-    }
-
-    /// Extract the server's ``(code, message)`` from a rejection body,
-    /// mirroring the reference SDKs' ``parseErrorDetail``: a typed ``code``
-    /// when the envelope carries one, else the envelope's ``type``; a body
-    /// that does not parse falls back to a synthetic ``http_<status>``.
-    static func _parseErrorDetail(status: Int, data: Data) -> (code: String, message: String) {
-        let fallback = "http_\(status)"
-        let text = String(String(data: data, encoding: .utf8)?.prefix(500) ?? "")
-        guard
-            let payload = try? JSONDecoder().decode(JSONValue.self, from: data),
-            case .object(let object) = payload
-        else {
-            return (fallback, text)
-        }
-
-        if case .object(let error)? = object["error"] {
-            if case .string(let code)? = error["code"], case .string(let message)? = error["message"] {
-                return (code, message)
-            }
-            if case .object(let typed)? = error["message"], typed["code"] != nil {
-                return (_stringified(typed["code"]), _stringified(typed["message"]))
-            }
-            var type = fallback
-            if case .string(let value)? = error["type"], !value.isEmpty { type = value }
-            if case .string(let message)? = error["message"] {
-                return (type, message)
-            }
-            return (type, text)
-        }
-
-        if case .object(let detail)? = object["detail"], detail["code"] != nil {
-            return (_stringified(detail["code"]), _stringified(detail["message"]))
-        }
-        if case .string(let detail)? = object["detail"] {
-            return (fallback, detail)
-        }
-        return (fallback, text)
-    }
-
-    private static func _stringified(_ value: JSONValue?) -> String {
-        switch value {
-        case .string(let v): return v
-        case .int(let v): return String(v)
-        case .double(let v): return String(v)
-        case .bool(let v): return String(v)
-        case .null, .array, .object, .none: return ""
-        }
     }
 
     private struct EndpointResponse: Decodable {
@@ -304,14 +337,7 @@ public final class TokenSource: Sendable {
         }
     }
 
-    /// Tolerates the backend's ISO-8601 ``expires_at`` with or without
-    /// fractional seconds (FastAPI emits either depending on the value).
     private static func parseExpiresAt(_ raw: String) -> Date? {
-        let withFractional = ISO8601DateFormatter()
-        withFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = withFractional.date(from: raw) { return date }
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: raw)
+        RealtimeISO8601.date(from: raw)
     }
 }

@@ -1,6 +1,7 @@
 import CoreMedia
 import CosmoRealtimeAPI
 import Foundation
+import HTTPTypes
 import LiveKit
 import OpenAPIRuntime
 import OpenAPIURLSession
@@ -15,7 +16,12 @@ actor LiveKitSessionTransport: SessionTransport {
 
     fileprivate static let log = Logger(subsystem: CosmoRealtimeLog.subsystem, category: "session-transport")
 
-    private let options: RealtimeClient.Options
+    /// Participant attribute on the agent carrying the external ``ready``
+    /// frame verbatim — room state every joiner reads, however late, where
+    /// the one-shot data-channel broadcast can be missed.
+    static let readyAttribute = "cosmo.ready"
+
+    private let client: RealtimeClient
     // Accessed by the screen-share extension (deferred publish reads it)
     // and the DEBUG test hooks; the rest of the transport is the only
     // writer outside those.
@@ -76,8 +82,8 @@ actor LiveKitSessionTransport: SessionTransport {
     // down room never gets a late publish.
     nonisolated let isClosed = OSAllocatedUnfairLock<Bool>(initialState: false)
 
-    init(options: RealtimeClient.Options) {
-        self.options = options
+    init(client: RealtimeClient) {
+        self.client = client
         let inStream = AsyncStream<Float>.makeStream(bufferingPolicy: .bufferingNewest(1))
         self.inputLevels = inStream.stream
         self.inputLevelContinuation = inStream.continuation
@@ -88,8 +94,6 @@ actor LiveKitSessionTransport: SessionTransport {
         self.outputLevelTap = AudioLevelTap(continuation: outStream.continuation)
     }
 
-    nonisolated var connectTimings: SessionConnectTimings { timings.snapshot() }
-
     func connect(
         configFrame: Data,
         callbacks: SessionTransportCallbacks,
@@ -97,9 +101,11 @@ actor LiveKitSessionTransport: SessionTransport {
         backgroundClientToolHandlers: [String: BackgroundClientToolHandler],
         clientToolJobSink: ClientToolJobSink?,
         hooks: HookEngine?,
+        hookExemptMethods: Set<String>,
         micMuted: Bool
     ) async throws -> SessionStartInfo {
         let handshakeStart = Date()
+        timings.setHandshakeStart(handshakeStart)
         let config: CosmoRealtimeAPI.Components.Schemas.SessionConfig
         do {
             config = try JSONDecoder().decode(
@@ -119,11 +125,11 @@ actor LiveKitSessionTransport: SessionTransport {
         // (header middleware) so the backend dispatches the agent onto that
         // room. With no provider installed there is nothing to take and the
         // connect is serialized.
-        let prepared = RealtimeSession._takePreparedRoom(for: options)
+        let prepared = RealtimeSession._takePreparedRoom(for: client)
         let restClient = CosmoRealtimeAPI.Client(
-            serverURL: options.baseURL,
-            transport: makeRESTTransport(options: options),
-            middlewares: options._apiMiddlewares(prepared: prepared)
+            serverURL: client.baseURL,
+            transport: makeRESTTransport(client: client),
+            middlewares: client._apiMiddlewares(prepared: prepared)
         )
 
         let newRoom: Room
@@ -181,6 +187,7 @@ actor LiveKitSessionTransport: SessionTransport {
                 backgroundClientToolHandlers: backgroundClientToolHandlers,
                 clientToolJobSink: clientToolJobSink,
                 hooks: hooks,
+                hookExemptMethods: hookExemptMethods,
                 sessionId: startSessionId
             )
         } catch {
@@ -199,7 +206,10 @@ actor LiveKitSessionTransport: SessionTransport {
         // On the serialized path ``startTask`` is already resolved, so this
         // ordering degenerates to the same sequence as before.
         let joinTask = Task {
-            try await self._joinRoom(newRoom, url: joinURL, token: joinToken, micMuted: micMuted)
+            try await self._joinRoom(
+                newRoom, url: joinURL, token: joinToken, micMuted: micMuted,
+                delegate: delegate
+            )
         }
 
         let session: CosmoRealtimeAPI.Components.Schemas.SessionResponse
@@ -228,9 +238,9 @@ actor LiveKitSessionTransport: SessionTransport {
             Self.log.warning("prepared room refused at session start — retrying without it")
             session = try await Self._callStart(
                 client: CosmoRealtimeAPI.Client(
-                    serverURL: options.baseURL,
-                    transport: makeRESTTransport(options: options),
-                    middlewares: options._apiMiddlewares(prepared: nil)
+                    serverURL: client.baseURL,
+                    transport: makeRESTTransport(client: client),
+                    middlewares: client._apiMiddlewares(prepared: nil)
                 ),
                 config: config
             )
@@ -238,7 +248,7 @@ actor LiveKitSessionTransport: SessionTransport {
             preparedJoinAbandoned = true
         }
         if let t = session.timings {
-            timings.setServerTimings(t)
+            timings.setServerTimings(RealtimeSessionStartTimings(t))
         }
 
         // Version-skew fallback: a backend that doesn't read the room-ref
@@ -269,6 +279,7 @@ actor LiveKitSessionTransport: SessionTransport {
                 backgroundClientToolHandlers: backgroundClientToolHandlers,
                 clientToolJobSink: clientToolJobSink,
                 hooks: hooks,
+                hookExemptMethods: hookExemptMethods,
                 micMuted: micMuted
             )
             activeRoom = joined.room
@@ -349,7 +360,7 @@ actor LiveKitSessionTransport: SessionTransport {
             }
         }
         Self.log.info("transport connected sessionId=\(session.sessionId, privacy: .public)")
-        return SessionStartInfo(response: session)
+        return SessionStartInfo(sessionId: session.sessionId)
     }
 
     /// Give up on an in-flight join without waiting for it: detach the
@@ -386,6 +397,7 @@ actor LiveKitSessionTransport: SessionTransport {
         backgroundClientToolHandlers: [String: BackgroundClientToolHandler],
         clientToolJobSink: ClientToolJobSink?,
         hooks: HookEngine?,
+        hookExemptMethods: Set<String>,
         micMuted: Bool
     ) async throws -> (
         room: Room,
@@ -407,6 +419,7 @@ actor LiveKitSessionTransport: SessionTransport {
                 backgroundClientToolHandlers: backgroundClientToolHandlers,
                 clientToolJobSink: clientToolJobSink,
                 hooks: hooks,
+                hookExemptMethods: hookExemptMethods,
                 sessionId: { session.sessionId }
             )
         } catch {
@@ -415,7 +428,8 @@ actor LiveKitSessionTransport: SessionTransport {
         }
         do {
             try await _joinRoom(
-                room, url: session.livekitUrl, token: session.token, micMuted: micMuted
+                room, url: session.livekitUrl, token: session.token, micMuted: micMuted,
+                delegate: delegate
             )
         } catch {
             stream.continuation.finish()
@@ -433,7 +447,7 @@ actor LiveKitSessionTransport: SessionTransport {
     private static func _isPreparedRoomRefusal(_ error: any Error) -> Bool {
         guard
             let failure = error as? SessionStartFailure,
-            case .rejected(let status, _, _) = failure
+            case .rejected(let status, _, _, _, _) = failure
         else { return false }
         return status == 403
     }
@@ -442,16 +456,17 @@ actor LiveKitSessionTransport: SessionTransport {
     /// peer connection rides the initial negotiation — unless ``micMuted``,
     /// where the privacy contract is to join without publishing audio (the
     /// track first publishes on ``setMicrophoneEnabled(true)``). Bounded by
-    /// ``options.connectTimeout``; throws ``SessionStartFailure``.
+    /// ``client.connectTimeout``; throws ``SessionStartFailure``.
     private func _joinRoom(
         _ room: Room,
         url: String,
         token: String,
-        micMuted: Bool
+        micMuted: Bool,
+        delegate: SessionRoomDelegate
     ) async throws {
         do {
             try await _withConnectTimeout(
-                seconds: options.connectTimeout,
+                seconds: client.connectTimeout,
                 operation: {
                     try await room.connect(
                         url: url,
@@ -463,17 +478,43 @@ actor LiveKitSessionTransport: SessionTransport {
                     await room.disconnect()
                 }
             )
-        } catch RealtimeError.connectTimeout {
-            throw SessionStartFailure.transport(
-                message: "LiveKit Room.connect timed out after \(options.connectTimeout)s"
+        } catch is ConnectTimeoutReached {
+            throw Self.joinFailure(
+                delegate: delegate,
+                fallback: "LiveKit Room.connect timed out after \(client.connectTimeout)s"
             )
         } catch {
-            throw SessionStartFailure.transport(message: error.localizedDescription)
+            if let code = Self.captureFailureCode(error) {
+                throw SessionStartFailure.captureUnavailable(
+                    code: code, message: error.localizedDescription
+                )
+            }
+            throw Self.joinFailure(
+                delegate: delegate, fallback: error.localizedDescription
+            )
         }
+        // The agent may already be up: its readiness attribute arrives with
+        // the join-time participant state, where its one-shot ready frame
+        // would already have been missed.
+        delegate.scanForReadyAttribute(in: room)
+    }
+
+    /// Classify a join that failed. A close seen while the connect was still
+    /// in flight — a boot that deleted the room mid-negotiation — is the
+    /// window's handshake failure, and the reason LiveKit reported is better
+    /// detail than the join's own error. Anything else stays a transport
+    /// failure.
+    static func joinFailure(
+        delegate: SessionRoomDelegate, fallback: String
+    ) -> SessionStartFailure {
+        guard let lost = delegate.connectLost.withLock({ $0 }) else {
+            return .joinFailed(message: fallback)
+        }
+        return .roomLostDuringJoin(reason: lost)
     }
 
     func send(frame: Data) async throws {
-        guard let room else { throw RealtimeSessionError.notConnected }
+        guard let room else { throw SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.") }
         // Retry over the DTLS-handshake race: only the literal
         // "Data channel is not open" retries, with 50ms-doubling backoff.
         let maxAttempts = 5
@@ -492,29 +533,35 @@ actor LiveKitSessionTransport: SessionTransport {
                     try? await Task.sleep(nanoseconds: 50_000_000 << attempt)
                     continue
                 }
-                throw error
+                throw SessionStartError(code: .transport, message: error.localizedDescription)
             }
         }
-        if let lastError { throw lastError }
+        if let lastError {
+            throw SessionStartError(code: .transport, message: lastError.localizedDescription)
+        }
     }
 
     func sendBytes(_ data: Data, topic: String) async throws {
-        guard let room else { throw RealtimeSessionError.notConnected }
+        guard let room else { throw SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.") }
         // A byte stream needs explicit destinations; target the agent only.
         let agentIdentities = room.remoteParticipants.values
             .filter { $0.kind == .agent }
             .compactMap(\.identity)
-        guard !agentIdentities.isEmpty else { throw RealtimeSessionError.notConnected }
-        let writer = try await room.localParticipant.streamBytes(
-            options: StreamByteOptions(topic: topic, destinationIdentities: agentIdentities)
-        )
+        guard !agentIdentities.isEmpty else { throw SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.") }
         do {
-            try await writer.write(data)
+            let writer = try await room.localParticipant.streamBytes(
+                options: StreamByteOptions(topic: topic, destinationIdentities: agentIdentities)
+            )
+            do {
+                try await writer.write(data)
+            } catch {
+                try? await writer.close()
+                throw error
+            }
+            try await writer.close()
         } catch {
-            try? await writer.close()
-            throw error
+            throw SessionStartError(code: .transport, message: error.localizedDescription)
         }
-        try await writer.close()
     }
 
     func setMicrophoneEnabled(_ enabled: Bool) async throws {
@@ -532,7 +579,35 @@ actor LiveKitSessionTransport: SessionTransport {
             // publish, so a denied-permission failure must reach ``setMuted``
             // instead of reporting a false success while nothing is published.
             Self.log.error("setMicrophone(enabled: \(enabled, privacy: .public)) failed: \(error.localizedDescription, privacy: .public)")
-            throw error
+            // Classified here, where the failure still has a type. Above this
+            // point every publish failure is flattened into one case, and
+            // reading the host's permissions instead would relabel any of them
+            // on a machine that simply has no microphone.
+            if let code = Self.captureFailureCode(error) {
+                throw AudioUnavailableError(message: error.localizedDescription, code: code)
+            }
+            throw SessionStartError(code: .transport, message: error.localizedDescription)
+        }
+    }
+
+    /// The microphone slug for a publish failure, or `nil` when the failure is
+    /// not about the device. Keyed on LiveKit's own error type — the same
+    /// one-way mapping the other SDKs make from their platform's error, so a
+    /// vendor type never reaches ``AudioUnavailableError``.
+    ///
+    /// Only a refused capture is nameable: the audio device module reports
+    /// permission, session-configuration and engine faults, and a host with no
+    /// input device fails as an engine fault indistinguishable from the rest —
+    /// so it reports the generic ``AudioUnavailableErrorCode/audioUnavailable``
+    /// rather than guessing which. `deviceNotFound` is not in the map because
+    /// the vendor raises it for cameras alone; its neighbours in that block are
+    /// capture-format and FPS-range faults.
+    static func captureFailureCode(_ error: Error) -> AudioUnavailableErrorCode? {
+        guard let liveKitError = error as? LiveKitError else { return nil }
+        switch liveKitError.type {
+        case .deviceAccessDenied: return .micDenied
+        case .audioEngine, .audioSession: return .audioUnavailable
+        default: return nil
         }
     }
 
@@ -697,12 +772,14 @@ actor LiveKitSessionTransport: SessionTransport {
         backgroundClientToolHandlers: [String: BackgroundClientToolHandler],
         clientToolJobSink: ClientToolJobSink?,
         hooks: HookEngine?,
+        hookExemptMethods: Set<String> = [],
         sessionId: @escaping @Sendable () async -> String?
     ) async throws {
         try await registerClientToolHandlers(
             on: room,
             handlers: clientToolHandlers,
             hooks: hooks,
+            hookExemptMethods: hookExemptMethods,
             sessionId: sessionId
         )
         if let clientToolJobSink, !backgroundClientToolHandlers.isEmpty {
@@ -716,14 +793,14 @@ actor LiveKitSessionTransport: SessionTransport {
         }
     }
 
-    /// A ``MintTokenError`` raised while resolving the credential travels
+    /// A ``TokenSourceError`` raised while resolving the credential travels
     /// through the generated client wrapped in a ``ClientError``; recover
-    /// it so the token-source failure (and its slug) survives to the caller.
-    static func _mintTokenError(in error: any Error) -> MintTokenError? {
-        if let mintError = error as? MintTokenError { return mintError }
+    /// it so the token-source failure (and its code) survives to the caller.
+    static func _tokenSourceError(in error: any Error) -> TokenSourceError? {
+        if let sourceError = error as? TokenSourceError { return sourceError }
         if let clientError = error as? ClientError,
-           let mintError = clientError.underlyingError as? MintTokenError {
-            return mintError
+           let sourceError = clientError.underlyingError as? TokenSourceError {
+            return sourceError
         }
         return nil
     }
@@ -739,8 +816,8 @@ actor LiveKitSessionTransport: SessionTransport {
         do {
             output = try await client.startRealtimeSession(body: .json(config))
         } catch {
-            if let mintError = _mintTokenError(in: error) {
-                throw SessionStartFailure.credential(mintError)
+            if let sourceError = _tokenSourceError(in: error) {
+                throw SessionStartFailure.credential(sourceError)
             }
             throw SessionStartFailure.transport(message: error.localizedDescription)
         }
@@ -749,7 +826,7 @@ actor LiveKitSessionTransport: SessionTransport {
             do {
                 return try ok.body.json
             } catch {
-                throw SessionStartFailure.transport(
+                throw SessionStartFailure.invalidResponse(
                     message: "session-start response decode failed: \(error.localizedDescription)"
                 )
             }
@@ -771,7 +848,13 @@ actor LiveKitSessionTransport: SessionTransport {
         case .undocumented(let statusCode, let payload):
             let body = await Self._collectBody(payload)
             let detail = body.isEmpty ? "HTTP \(statusCode)" : "HTTP \(statusCode): \(body)"
-            throw SessionStartFailure.rejected(status: statusCode, code: rejectionCode(inBody: body), detail: detail)
+            throw SessionStartFailure.rejected(
+                status: statusCode,
+                code: rejectionCode(inBody: body),
+                detail: detail,
+                retryAfterSeconds: retryAfterSeconds(header: payload.headerFields[.retryAfter]),
+                rejection: SessionStartRejection.from(body: Data(body.utf8))
+            )
         }
     }
 
@@ -802,6 +885,16 @@ final class SessionRoomDelegate: RoomDelegate, @unchecked Sendable {
     // published track. Lock-guarded: LiveKit delivers delegate callbacks
     // serially, but the delegate is ``@unchecked Sendable``.
     private let agentLiveSignaled = OSAllocatedUnfairLock<Bool>(initialState: false)
+    // The sign is delivered once: the agent's ``cosmo.ready`` attribute and
+    // the data-channel frame carry the same payload, and whichever lands
+    // first wins.
+    private let readyAttributeSeen = OSAllocatedUnfairLock<Bool>(initialState: false)
+    /// A close observed while ``Room.connect`` was still in flight. LiveKit
+    /// reports a failed connect as a disconnect too, so this is not forwarded
+    /// as a session close — but a room deleted mid-join is the only evidence
+    /// a fast boot failure leaves, and the join's own error says nothing
+    /// about why. The session reads it as pre-ready failure evidence.
+    let connectLost = OSAllocatedUnfairLock<RealtimeSession.CloseReason?>(initialState: nil)
 
     init(
         frames: AsyncStream<Data>.Continuation,
@@ -845,6 +938,54 @@ final class SessionRoomDelegate: RoomDelegate, @unchecked Sendable {
         frames.yield(data)
     }
 
+    func room(_ room: Room, participant: Participant, didUpdateAttributes attributes: [String: String]) {
+        emitReadyAttribute(of: participant)
+    }
+
+    /// Feed the agent's readiness attribute into the frame stream as the
+    /// ``ready`` frame it carries verbatim, once. Attributes are room state
+    /// every joiner reads — however late — where the one-shot data-channel
+    /// broadcast can be missed; the session drops whichever delivery of the
+    /// two arrives second.
+    func emitReadyAttribute(of participant: Participant) {
+        guard participant.isAgent else { return }
+        guard let payload = Self.readyPayload(in: participant.attributes) else { return }
+        let alreadySeen = readyAttributeSeen.withLock { seen -> Bool in
+            if seen { return true }
+            seen = true
+            return false
+        }
+        if alreadySeen { return }
+        frames.yield(payload)
+    }
+
+    /// The ``ready`` frame carried by an agent's attributes, or ``nil`` when
+    /// the sign is absent or unreadable. Pure, so the decode contract is
+    /// pinned without a live room: the attribute must be present, non-empty,
+    /// JSON, and the ``ready`` frame itself.
+    static func readyPayload(in attributes: [String: String]) -> Data? {
+        guard let value = attributes[LiveKitSessionTransport.readyAttribute],
+              !value.isEmpty,
+              let payload = value.data(using: .utf8)
+        else { return nil }
+        guard let object = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+              object["type"] as? String == "ready"
+        else {
+            LiveKitSessionTransport.log.warning("ready attribute is not a ready frame")
+            return nil
+        }
+        return payload
+    }
+
+    /// Read the sign off everyone already in the room — at join, and again
+    /// after a recovery, which can rebuild participants with attributes
+    /// already populated and fire no update.
+    func scanForReadyAttribute(in room: Room) {
+        for participant in room.remoteParticipants.values {
+            emitReadyAttribute(of: participant)
+        }
+    }
+
     func room(
         _ room: Room,
         didUpdateConnectionState connectionState: LiveKit.ConnectionState,
@@ -855,6 +996,7 @@ final class SessionRoomDelegate: RoomDelegate, @unchecked Sendable {
             // The initial join is reported by ``connect`` itself; only
             // surface recoveries.
             if case .reconnecting = oldConnectionState {
+                scanForReadyAttribute(in: room)
                 enqueue { [callbacks] in await callbacks.onReconnected() }
             }
         case .reconnecting:
@@ -865,6 +1007,7 @@ final class SessionRoomDelegate: RoomDelegate, @unchecked Sendable {
                 forDisconnectType: room.disconnectError?.type,
                 message: room.disconnectError?.localizedDescription
             )
+            connectLost.withLock { $0 = $0 ?? reason }
             enqueue { [callbacks, weak transport] in
                 await transport?.awaitFramePumpDrained()
                 await callbacks.onClosed(reason)
@@ -880,6 +1023,7 @@ final class SessionRoomDelegate: RoomDelegate, @unchecked Sendable {
             forDisconnectType: error?.type,
             message: error?.localizedDescription
         )
+        connectLost.withLock { $0 = $0 ?? reason }
         enqueue { [callbacks, weak transport] in
             await transport?.awaitFramePumpDrained()
             await callbacks.onClosed(reason)
@@ -918,7 +1062,7 @@ final class SessionRoomDelegate: RoomDelegate, @unchecked Sendable {
 }
 
 /// Classify a LiveKit disconnect into the session's end reason. Deliberate
-/// server-side closes map to ``RealtimeSession/EndReason/serverEnded(reason:)``;
+/// server-side closes map to ``RealtimeSession/CloseReason/serverEnded(reason:)``;
 /// everything else — including ``serverShutdown``, infrastructure failure from
 /// the caller's perspective — stays ``transportError``. Same mapping as the
 /// sibling SDKs, with one platform gap: client-sdk-swift has no error
@@ -927,7 +1071,7 @@ final class SessionRoomDelegate: RoomDelegate, @unchecked Sendable {
 func endReason(
     forDisconnectType type: LiveKitErrorType?,
     message: String?
-) -> RealtimeSession.EndReason {
+) -> RealtimeSession.CloseReason {
     switch type {
     case .roomDeleted:
         return .serverEnded(reason: "ROOM_DELETED")

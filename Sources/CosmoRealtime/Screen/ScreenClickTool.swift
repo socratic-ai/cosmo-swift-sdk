@@ -11,10 +11,15 @@ struct ScreenClickArgs: Sendable, Equatable {
 /// capture it was located in (a host re-reads ``ScreenCapture/context`` from it
 /// to check the screen hasn't moved on), and the click to perform.
 public struct ScreenClickRequest: Sendable {
+    /// The control to click, resolved from the handle the model passed back.
     public let element: ScreenElement
+    /// The capture the handle was issued against, so the handler can map the
+    /// element's coordinates onto the surface it was found on.
     public let capture: ScreenCapture
+    /// Which button, and whether it is a double-click.
     public let action: ScreenAction
 
+    /// A click request against an already-resolved element.
     public init(element: ScreenElement, capture: ScreenCapture, action: ScreenAction) {
         self.element = element
         self.capture = capture
@@ -40,7 +45,9 @@ public struct ScreenClickOutcome: Sendable, Equatable {
         ScreenClickOutcome(clicked: false, reason: reason)
     }
 
+    /// Whether the click landed.
     public let clicked: Bool
+    /// Why nothing was clicked, model-facing. `nil` when ``clicked`` is `true`.
     public let reason: String?
 
     private init(clicked: Bool, reason: String?) {
@@ -73,6 +80,8 @@ public enum ScreenClickTool {
     /// Tool-group key for backend telemetry + brain-allowlisting.
     public static let group = "screen"
 
+    /// The model-facing description advertised for this tool. Read it to see
+    /// what the model is told about when and how to call it.
     public static var toolDescription: String {
         """
         Click an element on the shared screen. Takes a found_element handle from \
@@ -143,7 +152,7 @@ extension AgentTool {
     /// session never took, or one older than ``ScreenCaptureCache/maxAge`` —
     /// declines before reaching your code, since acting on a snapshot the SDK
     /// cannot produce would be acting blind.
-    public static func screenClickElement(
+    static func screenClickElement(
         onClick: @escaping @Sendable (ScreenClickRequest) async throws -> ScreenClickOutcome
     ) -> AgentTool {
         screenClickElement(cache: .shared, onClick: onClick)

@@ -216,7 +216,7 @@ func invokeClientToolHandler(
             await hooks.runPostToolUse(PostToolUseContext(
                 toolName: toolName,
                 arguments: outcome.arguments,
-                outcome: .denied(reason),
+                outcome: .denied(reason: reason),
                 sessionId: sessionId
             ))
             return reply
@@ -234,7 +234,7 @@ func invokeClientToolHandler(
             clientToolLog.warning("client tool result truncated to fit the reply size limit tool=\(toolName, privacy: .public)")
         }
         reply = built.reply
-        toolOutcome = .ok(result)
+        toolOutcome = .ok(result: result)
     } catch {
         clientToolLog.error("client tool handler failed tool=\(toolName, privacy: .public): \(error.localizedDescription, privacy: .public)")
         warnIfHookRewriteBrokeValidation(error, toolName: toolName, argsRewritten: argsRewritten)
@@ -242,7 +242,7 @@ func invokeClientToolHandler(
             ? String(describing: type(of: error))
             : error.localizedDescription
         reply = clientToolErrorReply(message)
-        toolOutcome = .error(message)
+        toolOutcome = .error(message: message)
     }
 
     if let hooks, let sessionId {
@@ -298,6 +298,7 @@ func registerClientToolHandlers(
     on room: Room,
     handlers: [String: ClientToolHandler],
     hooks: HookEngine?,
+    hookExemptMethods: Set<String> = [],
     sessionId: @escaping @Sendable () async -> String?
 ) async throws {
     for (name, handler) in handlers {
@@ -325,7 +326,9 @@ func registerClientToolHandlers(
                     handler,
                     tool: name,
                     payload: data.payload,
-                    hooks: hooks,
+                    // Wire plumbing (the capture RPC, caller-registered RPC
+                    // methods) is not a tool call, so hooks skip it.
+                    hooks: hookExemptMethods.contains(name) ? nil : hooks,
                     sessionId: await sessionId()
                 )
             }
@@ -408,7 +411,7 @@ func invokeBackgroundClientToolHandler(
             let reason = outcome.reason ?? "denied by hook"
             await hooks.runPostToolUse(PostToolUseContext(
                 toolName: toolName, arguments: outcome.arguments,
-                outcome: .denied(reason), sessionId: sessionId
+                outcome: .denied(reason: reason), sessionId: sessionId
             ))
             return clientToolErrorReply(reason)
         }
@@ -441,10 +444,10 @@ func invokeBackgroundClientToolHandler(
     case .finishedWithoutAck:
         let message = "background client tool returned without acking or completing"
         clientToolLog.warning("realtime.client_tool_job.finished_without_ack tool=\(toolName, privacy: .public)")
-        await firePostToolUse(hooks, sessionId, toolName, resolvedArgs, .error(message))
+        await firePostToolUse(hooks, sessionId, toolName, resolvedArgs, .error(message: message))
         return clientToolErrorReply(message)
     case .failedBeforeAck(let message):
-        await firePostToolUse(hooks, sessionId, toolName, resolvedArgs, .error(message))
+        await firePostToolUse(hooks, sessionId, toolName, resolvedArgs, .error(message: message))
         return clientToolErrorReply(message)
     }
 }

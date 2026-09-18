@@ -21,7 +21,7 @@ struct SessionScreenShareTests {
 
     private func makeTransport() -> LiveKitSessionTransport {
         LiveKitSessionTransport(
-            options: RealtimeClient.Options(
+            client: RealtimeClient(
                 apiKey: "test-key"
             )
         )
@@ -39,7 +39,7 @@ struct SessionScreenShareTests {
             return
         }
         transport.handleScreenSharePublishFailure(
-            RealtimeSessionError.screenShareUnavailable, capturedState: state
+            SessionStateError(code: .screenShareUnavailable, message: "Screen share is unavailable: LiveKit BufferCapturer could not be created."), capturedState: state
         )
 
         #expect(!(await transport._testScreenShareLockHasValue()), "publish-failure recovery must clear the lock")
@@ -170,7 +170,7 @@ struct SessionScreenShareTests {
     func startWithoutRoomThrows() async throws {
         let transport = makeTransport()
 
-        await #expect(throws: RealtimeSessionError.notConnected) {
+        await #expect(throws: SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.")) {
             try await transport.startScreenShare()
         }
         #expect(!(await transport._testScreenShareLockHasValue()), "guard must reject before installing state")
@@ -195,14 +195,14 @@ struct VideoStreamPublishTests {
 
     private func makeTransport() -> LiveKitSessionTransport {
         LiveKitSessionTransport(
-            options: RealtimeClient.Options(apiKey: "test-key")
+            client: RealtimeClient(apiKey: "test-key")
         )
     }
 
     @Test("addVideoStream without a connected room throws .notConnected")
     func addWithoutRoomThrows() async throws {
         let transport = makeTransport()
-        await #expect(throws: RealtimeSessionError.notConnected) {
+        await #expect(throws: SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.")) {
             _ = try await transport.addVideoStream()
         }
         #expect(!(await transport._testScreenShareLockHasValue()))
@@ -226,11 +226,11 @@ struct VideoStreamPublishTests {
         await transport._testInstallDetachedRoom()
 
         _ = try await transport.addVideoStream()
-        await #expect(throws: RealtimeSessionError.videoPublishAlreadyActive) {
+        await #expect(throws: SessionStateError(code: .videoPublishAlreadyActive, message: "A video publish is already active on this session; remove or stop it before starting another.")) {
             _ = try await transport.addVideoStream()
         }
         // A live video stream must not be silently torn down by a share.
-        await #expect(throws: RealtimeSessionError.videoPublishAlreadyActive) {
+        await #expect(throws: SessionStateError(code: .videoPublishAlreadyActive, message: "A video publish is already active on this session; remove or stop it before starting another.")) {
             try await transport.startScreenShare()
         }
 
@@ -238,7 +238,7 @@ struct VideoStreamPublishTests {
         let shared = makeTransport()
         await shared._testInstallDetachedRoom()
         try await shared.startScreenShare()
-        await #expect(throws: RealtimeSessionError.videoPublishAlreadyActive) {
+        await #expect(throws: SessionStateError(code: .videoPublishAlreadyActive, message: "A video publish is already active on this session; remove or stop it before starting another.")) {
             _ = try await shared.addVideoStream()
         }
     }

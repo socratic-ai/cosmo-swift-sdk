@@ -253,7 +253,7 @@ struct ClientToolJobTests {
         #expect(ctx?.toolName == "export")
         #expect(ctx?.sessionId == "s1")
         #expect(ctx?.arguments == ["q": .string("now")])
-        #expect(ctx?.outcome == .ok(["url": .string("https://x")]))
+        #expect(ctx?.outcome == .ok(result: ["url": .string("https://x")]))
     }
 
     @Test("ack then fail fires PostToolUse with .error")
@@ -274,7 +274,7 @@ struct ClientToolJobTests {
         )
         await sink.drain()
 
-        #expect(await postBox.value == .error("export broke"))
+        #expect(await postBox.value == .error(message: "export broke"))
     }
 
     @Test("a raise after ack fires PostToolUse with .error via the auto-fail")
@@ -434,7 +434,7 @@ struct ClientToolJobTests {
         #expect(reply["ok"] == .bool(false))
         #expect(reply["error"] == .string("no exports"))
         #expect(await handlerRan.value == nil)
-        #expect(await postBox.value == .denied("no exports"))
+        #expect(await postBox.value == .denied(reason: "no exports"))
         #expect(await capture.results.isEmpty)
     }
 }

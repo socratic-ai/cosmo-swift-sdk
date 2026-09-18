@@ -9,16 +9,8 @@ let package = Package(
     ],
     products: [
         .library(name: "CosmoRealtime", targets: ["CosmoRealtime"]),
-        // The server-side mint capability (``RealtimeClient.mintToken``),
-        // opt-in on purpose: the realistic device consumer must never mint,
-        // so a plain ``import CosmoRealtime`` doesn't see the method.
-        .library(name: "CosmoRealtimeMint", targets: ["CosmoRealtimeMint"]),
     ],
     dependencies: [
-        .package(
-            url: "https://github.com/apple/swift-openapi-generator",
-            from: "1.6.0"
-        ),
         .package(
             url: "https://github.com/apple/swift-openapi-runtime",
             from: "1.5.0"
@@ -40,14 +32,21 @@ let package = Package(
     targets: [
         // Generated models + client for the published developer API.
         // Implementation detail — consumers import ``CosmoRealtime`` only.
+        //
+        // ``Generated/`` is committed rather than produced by the OpenAPI
+        // generator's build plugin, so this package needs no plugin approval
+        // in Xcode and brings no code-generation dependencies with it.
         .target(
             name: "CosmoRealtimeAPI",
             dependencies: [
                 .product(name: "OpenAPIRuntime", package: "swift-openapi-runtime"),
                 .product(name: "OpenAPIURLSession", package: "swift-openapi-urlsession"),
             ],
-            plugins: [
-                .plugin(name: "OpenAPIGenerator", package: "swift-openapi-generator"),
+            // Generator inputs, not build inputs — nothing reads them at
+            // compile time now that the output is committed.
+            exclude: [
+                "openapi.json",
+                "openapi-generator-config.yaml",
             ]
         ),
         .target(
@@ -59,19 +58,10 @@ let package = Package(
                 .product(name: "LiveKit", package: "client-sdk-swift"),
             ]
         ),
-        .target(
-            name: "CosmoRealtimeMint",
-            dependencies: [
-                "CosmoRealtime",
-                "CosmoRealtimeAPI",
-                .product(name: "OpenAPIRuntime", package: "swift-openapi-runtime"),
-            ]
-        ),
         .testTarget(
             name: "CosmoRealtimeTests",
             dependencies: [
                 "CosmoRealtime",
-                "CosmoRealtimeMint",
                 .product(name: "LiveKit", package: "client-sdk-swift"),
             ]
         ),

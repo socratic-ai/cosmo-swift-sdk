@@ -33,11 +33,11 @@ package struct PreparedRoom: Sendable {
 
 /// Source of ``PreparedRoom``s for the connect path.
 package protocol PreparedRoomProviding: Sendable {
-    /// Hand over a room prepared for a connect with `options`, or nil when
+    /// Hand over a room prepared for a connect with `client`, or nil when
     /// there is none, or the one held does not match this connect's backend,
     /// credential, or freshness policy. Destructive: a prepared room is handed
     /// out at most once, and a rejected one is dropped rather than kept.
-    func takePreparedRoom(for options: RealtimeClient.Options) -> PreparedRoom?
+    func takePreparedRoom(for client: RealtimeClient) -> PreparedRoom?
 }
 
 extension RealtimeSession {
@@ -53,7 +53,7 @@ extension RealtimeSession {
     }
 
     /// The installed provider's room for this connect, if any.
-    static func _takePreparedRoom(for options: Options) -> PreparedRoom? {
-        _preparedRoomProvider.withLock { $0 }?.takePreparedRoom(for: options)
+    static func _takePreparedRoom(for client: RealtimeClient) -> PreparedRoom? {
+        _preparedRoomProvider.withLock { $0 }?.takePreparedRoom(for: client)
     }
 }

@@ -13,12 +13,19 @@ struct ScreenHighlightArgs: Sendable, Equatable {
 /// What a highlight handler is asked to do: the element the handle resolved to
 /// and the capture it was located in, plus the tooltip to draw beside it.
 public struct ScreenHighlightRequest: Sendable {
+    /// The element to highlight.
     public let element: ScreenElement
+    /// The capture it was picked from — check its context if you need to
+    /// confirm the screen has not moved on.
     public let capture: ScreenCapture
+    /// Tooltip text to show beside the highlight.
     public let label: String
+    /// Which side of the element the tooltip sits on.
     public let placement: ScreenPlacement
+    /// Which glyph to draw — the action being asked of the user.
     public let interaction: ScreenAffordance
 
+    /// Creates a highlight request. The SDK builds these; you receive one.
     public init(
         element: ScreenElement,
         capture: ScreenCapture,
@@ -52,6 +59,8 @@ public enum ScreenHighlightTool {
     /// Tool-group key for backend telemetry + brain-allowlisting.
     public static let group = "screen"
 
+    /// The model-facing description advertised for this tool. Read it to see
+    /// what the model is told about when and how to call it.
     public static var toolDescription: String {
         """
         Highlight an element on the shared screen — point at it without acting on it. \
@@ -101,7 +110,7 @@ extension AgentTool {
     /// a real control, so ``ScreenHighlightOutcome/landedOnControl`` is the
     /// answer here; the outcome is shared with
     /// ``screenHighlightBox(onHighlight:)`` so the model reads one reply shape.
-    public static func screenHighlightElement(
+    static func screenHighlightElement(
         onHighlight: @escaping @Sendable (ScreenHighlightRequest) async throws -> ScreenHighlightOutcome
     ) -> AgentTool {
         screenHighlightElement(cache: .shared, onHighlight: onHighlight)
@@ -120,7 +129,7 @@ extension AgentTool {
                 guard let parsed = ScreenHighlightTool.args(from: args) else {
                     throw ScreenToolError(
                         message: "\(ScreenHighlightTool.name): pass found_element exactly as "
-                            + "cosmo_screen_locate returned it, plus a label"
+                            + "cosmo_screen_locate returned it, and a label"
                     )
                 }
                 guard let resolved = cache.resolve(parsed.foundElement) else {

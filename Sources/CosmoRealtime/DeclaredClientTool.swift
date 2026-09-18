@@ -9,7 +9,9 @@ import Foundation
 /// Declarations the server refuses (sanitization, caps, name collisions)
 /// are echoed on `RealtimeServerReady.rejected_tools` with a reason.
 public struct DeclaredClientTool: Sendable, Equatable {
+    /// Wire name the model calls. Must match `^[a-z][a-z0-9_]{2,63}$`.
     public var name: String
+    /// Model-facing description of when and how to call the tool.
     public var description: String
     /// JSON-schema object for the tool's arguments, as JSON text. The server
     /// accepts the restricted dialect of backend `client_declared.py`:
@@ -19,6 +21,7 @@ public struct DeclaredClientTool: Sendable, Equatable {
     /// Tool-group key for server telemetry (e.g. `"tmux"`, `"files"`).
     public var group: String?
 
+    /// A declaration for a tool the client implements.
     public init(
         name: String,
         description: String,

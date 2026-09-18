@@ -13,7 +13,7 @@ import Testing
                     frame: CGRect(x: 10, y: 20, width: 100, height: 30)
                 )
             ],
-            context: ScreenCaptureContext(appPID: appPID, windowFrame: nil)
+            context: appPID
         )
     }
 
@@ -22,7 +22,7 @@ import Testing
         cache.put("cap-1", capture())
         let found = cache.get("cap-1")
         #expect(found?.elements.first?.frame.midX == 60)
-        #expect(found?.context.appPID == 123)
+        #expect(found?.context as? pid_t == 123)
     }
 
     @Test func missesOnWrongId() {
@@ -61,10 +61,13 @@ import Testing
         }
     }
 
-    @Test func clearDropsEntry() {
+    @Test func exactlyAtMaxAgeIsExpired() {
+        // The boundary is exclusive, matching the Python and TypeScript caches:
+        // a handle exactly maxAge old no longer resolves.
         let cache = ScreenCaptureCache()
-        cache.put("cap-1", capture())
-        cache.clear()
-        #expect(cache.get("cap-1") == nil)
+        let base = Date(timeIntervalSince1970: 1_000)
+        cache.put("cap-1", capture(), now: base)
+        #expect(cache.get("cap-1", now: base.addingTimeInterval(ScreenCaptureCache.maxAge)) == nil)
+        #expect(cache.get("cap-1", now: base.addingTimeInterval(ScreenCaptureCache.maxAge - 0.001)) != nil)
     }
 }

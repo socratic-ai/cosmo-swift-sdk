@@ -348,7 +348,7 @@ struct ClientToolDispatchTests {
         }
         #expect(await handlerCalled.value == nil)
         let postOutcome = await postOutcomeBox.value
-        #expect(postOutcome == .denied("blocked"))
+        #expect(postOutcome == .denied(reason: "blocked"))
     }
 
     @Test("PreToolUse rewrite reaches handler with updated args")

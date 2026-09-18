@@ -46,7 +46,7 @@ struct MiddlewareTests {
         #expect(captured?.headerFields[.authorization] == "Bearer abc123")
         #expect(
             captured?.headerFields[BearerAuthMiddleware.sdkHeaderField]
-                == "\(RealtimeSession.sdkName)/\(RealtimeSession.sdkVersion)"
+                == "\(sdkName)/\(sdkVersion)"
         )
     }
 
@@ -135,7 +135,7 @@ struct MiddlewareTests {
     )
     func bearerEmitsValueForBothCredentialForms(token: String) async throws {
         for credential in [
-            RealtimeClient.Options.Credential.apiKey(token), .token(token),
+            RealtimeClient.Credential.apiKey(token), .token(token),
         ] {
             let middleware = BearerAuthMiddleware(credential: credential)
             let request = makeRequest()

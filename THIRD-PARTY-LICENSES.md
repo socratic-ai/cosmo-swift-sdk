@@ -13,18 +13,12 @@ license review found no copyleft (GPL/AGPL/LGPL/MPL) components.
 | --- | --- | --- | --- |
 | LiveKit client-sdk-swift | Apache-2.0 | LiveKit, Inc. | https://github.com/livekit/client-sdk-swift |
 | livekit-uniffi-xcframework | Apache-2.0 | LiveKit, Inc. | https://github.com/livekit/livekit-uniffi-xcframework |
-| OpenAPIKit | MIT | Mathew Polzin | https://github.com/mattpolzin/OpenAPIKit |
-| swift-algorithms | Apache-2.0 | Apple Inc. | https://github.com/apple/swift-algorithms |
-| swift-argument-parser | Apache-2.0 | Apple Inc. | https://github.com/apple/swift-argument-parser |
 | swift-collections | Apache-2.0 | Apple Inc. | https://github.com/apple/swift-collections |
 | swift-http-types | Apache-2.0 | Apple Inc. | https://github.com/apple/swift-http-types |
-| swift-numerics | Apache-2.0 | Apple Inc. | https://github.com/apple/swift-numerics |
-| swift-openapi-generator | Apache-2.0 | Apple Inc. | https://github.com/apple/swift-openapi-generator |
 | swift-openapi-runtime | Apache-2.0 | Apple Inc. | https://github.com/apple/swift-openapi-runtime |
 | swift-openapi-urlsession | Apache-2.0 | Apple Inc. | https://github.com/apple/swift-openapi-urlsession |
 | swift-protobuf | Apache-2.0 | Apple Inc. | https://github.com/apple/swift-protobuf |
 | webrtc-xcframework (WebRTC) | BSD-3-Clause | The WebRTC project authors / Google LLC | https://github.com/livekit/webrtc-xcframework |
-| Yams | MIT | JP Simard | https://github.com/jpsim/Yams |
 
 ## License texts
 
@@ -34,29 +28,6 @@ The full text of the Apache License 2.0 is reproduced in this package's
 `LICENSE` file. Apache-2.0 components above are provided under those terms;
 their `NOTICE` attributions (where present) are retained by their
 distributors and are available in each component's source repository.
-
-### MIT License
-
-```
-MIT License
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software is furnished to do so,
-subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
-FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
-COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN
-AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
-WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-```
 
 ### BSD 3-Clause License
 

@@ -1,5 +1,6 @@
 import Foundation
 
+/// When to verify a server's TLS certificate.
 public enum VerifyTLS: Sendable, Equatable {
     /// Verify for remote hosts, skip for loopback (self-signed local dev). Default.
     case auto
@@ -9,6 +10,7 @@ public enum VerifyTLS: Sendable, Equatable {
     /// for remote hosts too, not just loopback.
     case disabled
 
+    /// Whether to verify the TLS certificate when connecting to `host`.
     public func resolve(forHost host: String) -> Bool {
         switch self {
         case .enabled:  return true

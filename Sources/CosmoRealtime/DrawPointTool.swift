@@ -3,9 +3,12 @@ import Foundation
 /// One model request to mark a spot over the user's live view: where, and an
 /// optional short caption. Decoded from a `cosmo_sdk_draw_point` invocation.
 public struct DrawPointRequest: Sendable, Equatable {
+    /// Where to mark, normalized to the frame the model was shown.
     public var point: NormalizedPoint
+    /// Short caption to show beside the marker, when the model supplied one.
     public var label: String?
 
+    /// A point request for the given position and optional caption.
     public init(point: NormalizedPoint, label: String? = nil) {
         self.point = point
         self.label = label
@@ -27,6 +30,8 @@ public enum DrawPointTool {
     /// Tool-group key for backend telemetry + brain-allowlisting.
     public static let group = "ui"
 
+    /// The model-facing description advertised for this tool. Read it to see
+    /// what the model is told about when and how to call it.
     public static var toolDescription: String {
         """
         Mark a single spot on the user's live view (their camera or screen preview) — one \
@@ -75,7 +80,7 @@ extension AgentTool {
     /// The point renderer, ready to add to ``RealtimeAgent/tools`` alongside
     /// the locator that feeds it. Same contract as
     /// ``drawBox(onDraw:)``, with a ``DrawPointRequest``.
-    public static func drawPoint(
+    static func drawPoint(
         onDraw: @escaping @MainActor @Sendable (DrawPointRequest) -> DrawOutcome
     ) -> AgentTool {
         .sdkClient(SDKClientTool(

@@ -6,7 +6,7 @@ import Testing
 @Suite("SessionEvent cosmo classification")
 struct SessionEventCosmoTests {
 
-    private func classify(_ json: String) -> RealtimeSession.Event {
+    private func classify(_ json: String) -> RealtimeSessionEvent {
         guard case .event(let event) = RealtimeSession.classifyFrame(Data(json.utf8)) else {
             Issue.record("expected a classified event, got an envelope chunk")
             return .pong
@@ -14,17 +14,30 @@ struct SessionEventCosmoTests {
         return event
     }
 
-    @Test("cosmo.usage classifies into Event.cosmo(.usage)")
+    @Test("cosmo.usage classifies into RealtimeSessionEvent.usage")
     func cosmoUsage() {
         let event = classify(
             #"{"type":"cosmo.usage","input_audio_tokens":10,"total_tokens":42}"#
         )
-        guard case .cosmo(.usage(let usage)) = event else {
+        guard case .usage(let usage) = event else {
             Issue.record("expected .cosmo(.usage), got \(event)")
             return
         }
         #expect(usage.inputAudioTokens == 10)
         #expect(usage.totalTokens == 42)
+    }
+
+    @Test("session-ending-soon classifies into RealtimeSessionEvent.sessionEndingSoon")
+    func sessionEndingSoon() {
+        let event = classify(
+            #"{"type":"session-ending-soon","seconds_remaining":45,"reason":"max_session_duration"}"#
+        )
+        guard case .sessionEndingSoon(let warning) = event else {
+            Issue.record("expected .sessionEndingSoon, got \(event)")
+            return
+        }
+        #expect(warning.secondsRemaining == 45)
+        #expect(warning.reason == "max_session_duration")
     }
 
     @Test("an unrecognized cosmo.* type surfaces as unknown, never terminal")
@@ -51,5 +64,6 @@ struct SessionEventCosmoTests {
         }
         #expect(ready.agent?.name == "driver-pay")
         #expect(ready.agent?.tools == ["cosmo.web_search"])
+        #expect(ready.rejectedTools == [])
     }
 }

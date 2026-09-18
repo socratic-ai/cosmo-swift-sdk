@@ -6,11 +6,11 @@ import Testing
 /// or an error to throw. Records the params it was called with.
 final class FakeMCPTransport: MCPTransport, @unchecked Sendable {
     var responses: [String: String]
-    var errors: [String: MCPError]
+    var errors: [String: McpError]
     private(set) var requests: [(method: String, params: String)] = []
     private(set) var notifications: [(method: String, params: String)] = []
     var closed = false
-    init(responses: [String: String] = [:], errors: [String: MCPError] = [:]) {
+    init(responses: [String: String] = [:], errors: [String: McpError] = [:]) {
         self.responses = responses
         self.errors = errors
     }
@@ -56,10 +56,10 @@ struct MCPConnectionTests {
 
     @Test func rpcErrorPropagates() async throws {
         let conn = MCPConnection(
-            transport: FakeMCPTransport(errors: ["tools/list": .rpc("nope")]),
+            transport: FakeMCPTransport(errors: ["tools/list": McpError(code: .serverError, message: "nope")]),
             serverName: "fs"
         )
-        await #expect(throws: MCPError.self) { _ = try await conn.listTools() }
+        await #expect(throws: McpError.self) { _ = try await conn.listTools() }
     }
 
     @Test func callToolEscapesNameInParams() async throws {
@@ -84,7 +84,7 @@ struct MCPConnectionTests {
             transport: FakeMCPTransport(responses: ["tools/list": #"{"nottools":"surprise"}"#]),
             serverName: "fs"
         )
-        await #expect(throws: MCPError.self) { _ = try await conn.listTools() }
+        await #expect(throws: McpError.self) { _ = try await conn.listTools() }
     }
 
     @Test func callToolThrowsOnMalformedResponse() async throws {
@@ -92,7 +92,7 @@ struct MCPConnectionTests {
             transport: FakeMCPTransport(responses: ["tools/call": "not json at all {"]),
             serverName: "fs"
         )
-        await #expect(throws: MCPError.self) { _ = try await conn.callTool(name: "read", argsJSON: "{}") }
+        await #expect(throws: McpError.self) { _ = try await conn.callTool(name: "read", argsJSON: "{}") }
     }
 
     @Test func callToolDoesNotThrowWhenStructuredContentAbsent() async throws {

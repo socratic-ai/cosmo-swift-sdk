@@ -13,7 +13,7 @@ struct AgentPlaybackVolumeSessionTests {
 
     private func makeTransport() -> LiveKitSessionTransport {
         LiveKitSessionTransport(
-            options: RealtimeClient.Options(
+            client: RealtimeClient(
                 apiKey: "test-key"
             )
         )

@@ -32,9 +32,17 @@ struct StubError: Error {}
 
 func makeStubClient(
     _ transport: StubTransport,
-    options: RealtimeClient.Options = .init(apiKey: "sk-test")
+    credential: RealtimeClient.Credential = .apiKey("sk-test"),
+    baseURL: URL = RealtimeBaseURL.resolve()
 ) -> RealtimeClient {
-    RealtimeClient(options: options, transport: transport)
+    RealtimeClient(
+        credential: credential,
+        baseURL: baseURL,
+        connectTimeout: 30,
+        requestTimeout: 45,
+        verifyTLS: .auto,
+        transport: transport
+    )
 }
 
 func jsonResponse(_ status: HTTPResponse.Status, _ body: String) -> (HTTPResponse, HTTPBody?) {

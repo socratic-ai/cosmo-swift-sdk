@@ -42,12 +42,30 @@ func capTerminalResult(_ result: [String: JSONValue]?) -> [String: JSONValue]? {
 /// The terminal outcome a background handler delivers — carried to the sink as
 /// plain fields so this layer stays free of the generated wire type.
 public struct BackgroundToolResult: Sendable {
-    public enum Status: String, Sendable { case completed, failed }
+    /// Whether the background work succeeded.
+    public enum Status: String, Sendable {
+        /// The handler finished; ``BackgroundToolResult/summary`` carries the
+        /// model-facing text.
+        case completed
+        /// The handler failed; ``BackgroundToolResult/error`` carries the
+        /// model-facing text.
+        case failed
+    }
+    /// Identifies the job this result belongs to — the id the acked call was
+    /// given.
     public let jobId: String
+    /// Name of the tool that ran, for logging and attribution.
     public let toolName: String
+    /// Whether the work succeeded.
     public let status: Status
+    /// Structured data for your own records. Not forwarded to the model —
+    /// put anything it must act on in ``summary``.
     public let result: [String: JSONValue]?
+    /// Model-facing text for a completed job: what the assistant is told came
+    /// back, and what it speaks from.
     public let summary: String?
+    /// Model-facing text for a failed job, so the assistant can tell the user
+    /// something useful.
     public let error: String?
 }
 
@@ -60,6 +78,7 @@ public actor ClientToolJobSink {
     private let isOpen: @Sendable () async -> Bool
     private var tasks: [UUID: Task<Void, Never>] = [:]
 
+    /// A handle for reporting one background tool call's result.
     public init(
         deliver: @escaping @Sendable (BackgroundToolResult) async throws -> Void,
         isOpen: @escaping @Sendable () async -> Bool
@@ -114,7 +133,10 @@ public actor ClientToolJob {
         case failedBeforeAck(message: String)
     }
 
+    /// Identifies this job — the id the acked tool call was given, and what
+    /// the terminal result is matched back to.
     public let jobId: String
+    /// Name of the tool this job is running.
     public let toolName: String
     private let sink: ClientToolJobSink
     private let hooks: HookEngine?
@@ -147,6 +169,9 @@ public actor ClientToolJob {
         self.arguments = arguments
     }
 
+    /// Whether the RPC reply has been released yet, by ``ack(_:)`` or by a
+    /// terminal call that answered without one. Lets a handler that may reach
+    /// completion either way skip a redundant ``ack(_:)``, which is ignored.
     public var acked: Bool { ackedFlag }
 
     /// Release the RPC reply as a deferred ack. ``note`` is the model-facing
@@ -165,7 +190,7 @@ public actor ClientToolJob {
     public func complete(result: [String: JSONValue]? = nil, summary: String? = nil) async throws {
         try await deliverTerminal(
             status: .completed, result: result, summary: summary, error: nil,
-            outcome: .ok(result ?? [:])
+            outcome: .ok(result: result ?? [:])
         )
     }
 
@@ -174,7 +199,7 @@ public actor ClientToolJob {
     public func fail(error: String) async throws {
         try await deliverTerminal(
             status: .failed, result: nil, summary: nil, error: error,
-            outcome: .error(error)
+            outcome: .error(message: error)
         )
     }
 
@@ -281,5 +306,9 @@ public actor ClientToolJob {
     }
 }
 
+/// A handler for a tool that reports later. Call ``ClientToolJob/ack(note:)``
+/// to defer: the model is told the work is running and can keep talking,
+/// and the result arrives through the job. Returning without acking is
+/// reported to the model as an error, not as an empty success.
 public typealias BackgroundClientToolHandler =
     @Sendable ([String: JSONValue], ClientToolJob) async throws -> Void

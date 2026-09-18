@@ -27,14 +27,24 @@ import Testing
             return
         }
         #expect(inline.hooks?.count == 1)
-        #expect(inline.hooks?.first == Self.nudge())
+        #expect(inline.hooks?.first == .init(Self.nudge()))
     }
 
     @Test("a catalog launch rejects runtimeHooks loudly")
     func catalogRejectsRuntimeHooks() {
+        // A server hook on a catalog agent is a hook problem, not a generic
+        // stored-config one, so it reports the hook code the sibling SDKs do.
         let config = SessionConfig(agentName: "driver-pay", hooks: [.server(Self.nudge())])
-        #expect(throws: RealtimeSessionError.self) {
+        #expect(throws: HookError.self) {
             _ = try config.wirePayload()
+        }
+        do {
+            _ = try config.wirePayload()
+            Issue.record("expected a rejection")
+        } catch let error as HookError {
+            #expect(error.code == .serverHookNotAllowed)
+        } catch {
+            Issue.record("expected HookError, got \(error)")
         }
     }
 
@@ -59,7 +69,7 @@ import Testing
         let session = RealtimeSession(transport: transport)
         try await session._start(config: SessionConfig(hooks: [Hook.server(Self.nudge())]))
 
-        let consumer = Task { () -> RealtimeSession.UserSpeechTimeout? in
+        let consumer = Task { () -> UserSpeechTimeoutEvent? in
             for try await event in session.events {
                 if case .userSpeechTimeout(let payload) = event { return payload }
             }

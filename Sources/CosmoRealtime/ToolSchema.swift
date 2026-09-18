@@ -26,6 +26,8 @@ public struct ToolSchema: Sendable, Equatable {
 
     let node: Node
 
+    /// An object with the given properties. The top level of a tool's
+    /// parameters is always an object.
     public static func object(
         properties: [String: ToolSchema],
         required: [String] = [],
@@ -34,6 +36,7 @@ public struct ToolSchema: Sendable, Equatable {
         ToolSchema(node: .object(properties: properties, required: required, description: description))
     }
 
+    /// A string, optionally length-bounded and with a default.
     public static func string(
         description: String? = nil,
         minLength: Int? = nil,
@@ -46,6 +49,7 @@ public struct ToolSchema: Sendable, Equatable {
         ))
     }
 
+    /// A fractional number, optionally range-bounded and with a default.
     public static func number(
         description: String? = nil,
         minimum: Double? = nil,
@@ -58,6 +62,7 @@ public struct ToolSchema: Sendable, Equatable {
         ))
     }
 
+    /// A whole number, optionally range-bounded and with a default.
     public static func integer(
         description: String? = nil,
         minimum: Int? = nil,
@@ -70,6 +75,7 @@ public struct ToolSchema: Sendable, Equatable {
         ))
     }
 
+    /// A boolean, optionally with a default.
     public static func boolean(
         description: String? = nil,
         default defaultValue: Bool? = nil
@@ -77,6 +83,7 @@ public struct ToolSchema: Sendable, Equatable {
         ToolSchema(node: .boolean(description: description, defaultValue: defaultValue))
     }
 
+    /// An array whose elements all match one schema.
     public static func array(
         items: ToolSchema? = nil,
         description: String? = nil
@@ -94,6 +101,8 @@ public struct ToolSchema: Sendable, Equatable {
         ToolSchema(node: .choice(values: values, description: description, defaultValue: defaultValue))
     }
 
+    /// A value matching any one of the variants. An optional argument
+    /// lowers to this, paired with ``null``.
     public static func anyOf(
         _ variants: [ToolSchema],
         description: String? = nil

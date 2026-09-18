@@ -1,33 +1,39 @@
 import Foundation
 
-/// A ``AgentTool/define(name:description:input:handler:)`` declaration
-/// is invalid — bad tool name, missing/overlong description, or unclean text.
-/// Thrown when the tool is constructed, not at session connect.
-public struct ToolDefinitionError: Error, Sendable, Equatable, LocalizedError {
-    public let message: String
-    public var errorDescription: String? { message }
+/// One field-level violation on a tool call's arguments. Built from
+/// structured fields only — the submitted value never appears here.
+public struct ToolInputIssue: Sendable, Equatable {
+    /// Dotted path to the offending field (`address.city`, `items[2].sku`), or
+    /// `(root)` when the whole argument object was rejected.
+    public let path: String
+    /// The validator's stable issue code (`key_not_found`, `value_not_found`,
+    /// `type_mismatch`, `data_corrupted`).
+    public let code: String
+    /// The violated constraint (`required`, `expected a string`, …).
+    public let constraint: String
+
+    /// One violation, already sanitized.
+    public init(path: String, code: String, constraint: String) {
+        self.path = path
+        self.code = code
+        self.constraint = constraint
+    }
 }
 
 /// The model's arguments failed to decode inside a builder-synthesized tool
 /// handler. ``message`` follows the normalized `INVALID_INPUT` shape shared
 /// across the SDKs and is built from structured issue fields only — submitted
 /// values never appear, in the message or in ``issues``.
-public struct ToolInputValidationError: Error, Sendable, Equatable, LocalizedError {
-    public struct Issue: Sendable, Equatable {
-        /// Dotted path to the offending field (`address.city`, `items[2].sku`).
-        public let path: String
-        /// Stable slug for the `DecodingError` case (`key_not_found`,
-        /// `value_not_found`, `type_mismatch`, `data_corrupted`).
-        public let code: String
-        /// The violated constraint (`required`, `expected a string`, …).
-        public let constraint: String
-    }
-
-    public let issues: [Issue]
+public struct ToolInputValidationError: RealtimeError, Sendable, Equatable, LocalizedError {
+    /// Every violation found, so a caller can report them all at once
+    /// rather than one per round trip.
+    public let issues: [ToolInputIssue]
+    /// Every violation rendered into one model-facing string.
     public let message: String
+    /// The message, for `LocalizedError` presentation.
     public var errorDescription: String? { message }
 
-    init(toolName: String, issues: [Issue]) {
+    init(toolName: String, issues: [ToolInputIssue]) {
         self.issues = issues
         self.message = Self.formatMessage(toolName: toolName, issues: issues)
     }
@@ -35,7 +41,7 @@ public struct ToolInputValidationError: Error, Sendable, Equatable, LocalizedErr
     private static let maxIssueLines = 5
     private static let maxMessageBytes = 1024
 
-    static func formatMessage(toolName: String, issues: [Issue]) -> String {
+    static func formatMessage(toolName: String, issues: [ToolInputIssue]) -> String {
         let header = "INVALID_INPUT: \(toolName) rejected parameters:"
         let footer = "Fix the input and retry."
         var shown = min(issues.count, maxIssueLines)
@@ -51,11 +57,11 @@ public struct ToolInputValidationError: Error, Sendable, Equatable, LocalizedErr
 
     // Issues are derived from the DecodingError's structure only; its
     // debugDescription can embed the submitted value and is never used.
-    static func issues(from error: DecodingError) -> [Issue] {
+    static func issues(from error: DecodingError) -> [ToolInputIssue] {
         switch error {
         case .keyNotFound(let key, let context):
             return [
-                Issue(
+                ToolInputIssue(
                     path: path(context.codingPath + [key]),
                     code: "key_not_found",
                     constraint: "required"
@@ -63,7 +69,7 @@ public struct ToolInputValidationError: Error, Sendable, Equatable, LocalizedErr
             ]
         case .valueNotFound(_, let context):
             return [
-                Issue(
+                ToolInputIssue(
                     path: path(context.codingPath),
                     code: "value_not_found",
                     constraint: "required"
@@ -71,7 +77,7 @@ public struct ToolInputValidationError: Error, Sendable, Equatable, LocalizedErr
             ]
         case .typeMismatch(let type, let context):
             return [
-                Issue(
+                ToolInputIssue(
                     path: path(context.codingPath),
                     code: "type_mismatch",
                     constraint: "expected \(typeWord(type))"
@@ -79,14 +85,14 @@ public struct ToolInputValidationError: Error, Sendable, Equatable, LocalizedErr
             ]
         case .dataCorrupted(let context):
             return [
-                Issue(
+                ToolInputIssue(
                     path: path(context.codingPath),
                     code: "data_corrupted",
                     constraint: "not an allowed value"
                 )
             ]
         @unknown default:
-            return [Issue(path: "(root)", code: "unknown", constraint: "invalid")]
+            return [ToolInputIssue(path: "(root)", code: "unknown", constraint: "invalid")]
         }
     }
 
@@ -150,9 +156,9 @@ extension AgentTool {
     /// omitted field decodes as `nil` — fall back in code, `args.unit ?? .c`),
     /// and schema bounds are not runtime-enforced.
     ///
-    /// Throws ``ToolDefinitionError`` / ``ToolSchemaError`` at construction
+    /// Throws ``ToolDefinitionError`` at construction
     /// for a declaration the server would reject at session start.
-    public static func define<Args: Decodable & Sendable>(
+    static func define<Args: Decodable & Sendable>(
         name: String,
         description: String,
         input: ToolSchema,
@@ -173,7 +179,7 @@ extension AgentTool {
     /// of ``define(name:description:input:handler:)``: same declaration
     /// checks and typed decoding, with the handler driving a
     /// ``ClientToolJob`` (`ack` / `complete` / `fail`).
-    public static func defineBackground<Args: Decodable & Sendable>(
+    static func defineBackground<Args: Decodable & Sendable>(
         name: String,
         description: String,
         input: ToolSchema,
@@ -195,27 +201,32 @@ extension AgentTool {
     ) throws -> [String: JSONValue] {
         guard name.range(of: toolNamePattern, options: .regularExpression) != nil else {
             throw ToolDefinitionError(
+                code: .invalidToolName,
                 message: "tool name '\(name)' must match \(toolNamePattern)"
             )
         }
         guard !description.isEmpty else {
             throw ToolDefinitionError(
+                code: .missingDescription,
                 message: "tool '\(name)' has no description — the description is model-facing and required"
             )
         }
         guard description.count <= toolMaxDescriptionLength else {
             throw ToolDefinitionError(
+                code: .descriptionTooLong,
                 message: "tool '\(name)' description is \(description.count) characters; "
                     + "the protocol limit is \(toolMaxDescriptionLength)"
             )
         }
         if let reason = ClientToolSchemaDialect.textViolation(description, allowNewlines: true) {
-            throw ToolDefinitionError(message: "tool '\(name)' description \(reason)")
+            throw ToolDefinitionError(
+                code: .invalidText, message: "tool '\(name)' description \(reason)"
+            )
         }
         do {
             return try ClientToolSchemaDialect.checkedParameters(input.lowered())
-        } catch let error as ToolSchemaError {
-            throw ToolSchemaError(code: error.code, message: "\(name): \(error.message)")
+        } catch let error as ToolDefinitionError {
+            throw ToolDefinitionError(code: error.code, message: "\(name): \(error.message)")
         }
     }
 }
@@ -228,16 +239,15 @@ extension AgentTool {
 /// defined tool. Two samples are checked: required-only (catches a field the
 /// schema leaves optional but the type requires) and all-properties.
 public enum ToolSchemaConsistencyCheck {
-    public struct Failure: Error, Sendable, LocalizedError {
-        public let message: String
-        public var errorDescription: String? { message }
-    }
-
+    /// Check a schema against the type it is meant to decode into, throwing
+    /// ``ToolDefinitionError`` when they disagree. Two samples are tried: required-only,
+    /// which catches a field the schema leaves optional but the type
+    /// requires, and all-properties.
     public static func verify<Args: Decodable>(
         input: ToolSchema, decodesInto _: Args.Type
     ) throws {
         guard case .object = input.node else {
-            throw Failure(message: "input must be a top-level .object schema")
+            throw ToolDefinitionError(code: .schemaTypeMismatch, message: "input must be a top-level .object schema")
         }
         for includeOptional in [false, true] {
             let sample = input.sampleValue(includeOptionalProperties: includeOptional)
@@ -246,7 +256,8 @@ public enum ToolSchemaConsistencyCheck {
                 _ = try JSONDecoder().decode(Args.self, from: data)
             } catch {
                 let kind = includeOptional ? "all-properties" : "required-only"
-                throw Failure(
+                throw ToolDefinitionError(
+                    code: .schemaTypeMismatch,
                     message: "schema-derived \(kind) sample "
                         + String(decoding: data, as: UTF8.self)
                         + " does not decode into \(Args.self): \(error)"

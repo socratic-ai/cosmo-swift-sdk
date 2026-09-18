@@ -4,11 +4,16 @@ import Foundation
 /// — the coordinate convention the on-device Vision tools report
 /// (`FaceLandmarks.Box`) and that a preview overlay maps onto the screen.
 public struct NormalizedBox: Sendable, Equatable {
+    /// Left edge, `0` at the left of the frame and `1` at the right.
     public var x: Double
+    /// Top edge, `0` at the top of the frame and `1` at the bottom.
     public var y: Double
+    /// Width as a fraction of the frame's width.
     public var width: Double
+    /// Height as a fraction of the frame's height.
     public var height: Double
 
+    /// A rectangle at the given normalized coordinates.
     public init(x: Double, y: Double, width: Double, height: Double) {
         self.x = x
         self.y = y
@@ -20,9 +25,12 @@ public struct NormalizedBox: Sendable, Equatable {
 /// One model request to draw a box over the user's live view: where, and an optional
 /// short caption. Decoded from a `cosmo_sdk_draw_box` invocation's arguments.
 public struct DrawBoxRequest: Sendable, Equatable {
+    /// Where to draw, normalized to the frame the model was shown.
     public var box: NormalizedBox
+    /// Short caption to show on the box, when the model supplied one.
     public var label: String?
 
+    /// A draw request for the given box and optional caption.
     public init(box: NormalizedBox, label: String? = nil) {
         self.box = box
         self.label = label
@@ -48,6 +56,8 @@ public enum DrawBoxTool {
     /// Tool-group key for backend telemetry + brain-allowlisting.
     public static let group = "ui"
 
+    /// The model-facing description advertised for this tool. Read it to see
+    /// what the model is told about when and how to call it.
     public static var toolDescription: String {
         """
         Draw a box over the user's live view (their camera or screen preview) around \
@@ -132,7 +142,7 @@ extension AgentTool {
     /// model talking about something the user cannot see. Malformed
     /// arguments surface to the model as the invocation's error without
     /// reaching your code.
-    public static func drawBox(
+    static func drawBox(
         onDraw: @escaping @MainActor @Sendable (DrawBoxRequest) -> DrawOutcome
     ) -> AgentTool {
         .sdkClient(SDKClientTool(

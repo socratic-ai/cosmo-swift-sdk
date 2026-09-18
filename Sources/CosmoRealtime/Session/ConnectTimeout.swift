@@ -1,32 +1,33 @@
 import Foundation
 import os
 
+/// Raised when `_withConnectTimeout` hits its deadline. Internal callers
+/// convert it to a ``SessionStartFailure`` before it reaches an SDK caller.
+struct ConnectTimeoutReached: Error {}
+
 /// Run `operation` with a hard `seconds` deadline, throwing
-/// ``RealtimeError/connectTimeout`` if it doesn't settle in time.
+/// ``ConnectTimeoutReached`` if it doesn't settle in time.
 ///
 /// Unstructured tasks + a one-shot ``CheckedContinuation`` (guarded by an
 /// ``OSAllocatedUnfairLock``) rather than a task group, so a non-cancellable
-/// operation (LiveKit's ``Room.connect`` doesn't honor cooperative cancellation
-/// cleanly — the OS TCP timeout dominates on an unroutable URL) doesn't keep the
-/// caller waiting past the deadline; a `withThrowingTaskGroup` would block until
-/// every child settled on closure exit.
+/// operation doesn't keep the caller waiting past the deadline; a
+/// `withThrowingTaskGroup` would block until every child settled on closure exit.
 ///
 /// `onLateSettlement` runs ONCE, after the operation actually returns/throws, IF
 /// the timeout already won (the caller has moved on) — letting the caller
 /// schedule cleanup (e.g. `room.disconnect()`) against a settled state instead
 /// of racing a still-in-flight non-cancellable operation.
-func _withConnectTimeout(
+func _withConnectTimeout<T: Sendable>(
     seconds: TimeInterval,
-    operation: @escaping @Sendable () async throws -> Void,
+    operation: @escaping @Sendable () async throws -> T,
     onLateSettlement: @escaping @Sendable () async -> Void = {}
-) async throws {
+) async throws -> T {
     let resumed = OSAllocatedUnfairLock<Bool>(initialState: false)
-    return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+    return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<T, Error>) in
         let opTask = Task<Void, Never> {
-            let opResult: Result<Void, Error>
+            let opResult: Result<T, Error>
             do {
-                try await operation()
-                opResult = .success(())
+                opResult = .success(try await operation())
             } catch {
                 opResult = .failure(error)
             }
@@ -37,7 +38,7 @@ func _withConnectTimeout(
             }
             if !alreadyResumed {
                 switch opResult {
-                case .success: cont.resume()
+                case .success(let value): cont.resume(returning: value)
                 case .failure(let e): cont.resume(throwing: e)
                 }
             } else {
@@ -55,7 +56,7 @@ func _withConnectTimeout(
             }
             if !alreadyResumed {
                 opTask.cancel()
-                cont.resume(throwing: RealtimeError.connectTimeout)
+                cont.resume(throwing: ConnectTimeoutReached())
             }
         }
     }

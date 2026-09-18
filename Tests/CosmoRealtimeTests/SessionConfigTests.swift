@@ -26,8 +26,8 @@ struct SessionConfigTests {
         #expect(
             fields["sdk"]
                 == .object([
-                    "name": .string(RealtimeSession.sdkName),
-                    "version": .string(RealtimeSession.sdkVersion),
+                    "name": .string(sdkName),
+                    "version": .string(sdkVersion),
                 ])
         )
         // Empty agent/session sub-objects stay off the wire entirely.
@@ -57,44 +57,34 @@ struct SessionConfigTests {
     @Test("explicit noise-cancellation false is emitted so it wins over the server default")
     func explicitNoiseCancellationFalseIsEmitted() throws {
         let fields = try encodedFields(
-            SessionConfig(audio: .init(noiseCancellation: false))
+            SessionConfig(audio: .init(noiseCancellation: .off))
         )
         guard let agent = object(fields, "agent") else {
             Issue.record("expected an agent sub-object, got \(String(describing: fields["agent"]))")
             return
         }
-        #expect(agent["audio"] == .object(["noise_cancellation": .bool(false)]))
-    }
-
-    @Test("an empty ambience object survives serialization — presence enables the bed")
-    func emptyAmbienceObjectSurvives() throws {
-        let fields = try encodedFields(
-            SessionConfig(audio: .init(ambience: .init()))
-        )
-        guard let agent = object(fields, "agent") else {
-            Issue.record("expected an agent sub-object, got \(String(describing: fields["agent"]))")
-            return
-        }
-        #expect(agent["audio"] == .object(["ambience": .object([:])]))
+        #expect(agent["audio"] == .object(["noise_cancellation": .string("off")]))
     }
 
     @Test("set fields serialize under their wire names, nested by scope")
     func setFieldsSerialize() throws {
         let fields = try encodedFields(
             SessionConfig(
-                model: "gemini-live",
-                modelOptions: .gemini(
-                    temperature: 0.7, maxOutputTokens: 4096, thinkingLevel: .high),
+                model: .gemini(
+                    .init(
+                        modelId: "gemini-live",
+                        temperature: 0.7, maxOutputTokens: 4096, thinkingLevel: .high)),
                 voice: .init(name: "Puck", speakingStyle: "Talk warmly."),
-                audio: .init(output: false, noiseCancellation: true),
+                audio: .init(output: false, noiseCancellation: .voiceFocus),
                 instructions: "Be terse.",
                 tools: [
                     .client(
                         name: "get_local_time",
                         description: "Returns the local wall-clock time.",
                         parameters: ["type": .string("object")]
+                    , handler: { _ in [:] }
                     ),
-                    .webSearch,
+                    .webSearchTool(),
                 ],
                 interruptionSensitivity: .high,
                 greeting: "Hi, I'm Cosmo.",
@@ -107,17 +97,17 @@ struct SessionConfigTests {
             Issue.record("expected an agent sub-object, got \(String(describing: fields["agent"]))")
             return
         }
-        #expect(agent["model"] == .string("gemini-live"))
-        guard let modelOptions = object(agent, "model_options") else {
+        guard let model = object(agent, "model") else {
             Issue.record(
-                "expected a model_options sub-object, got \(String(describing: agent["model_options"]))"
+                "expected a model sub-object, got \(String(describing: agent["model"]))"
             )
             return
         }
-        #expect(modelOptions["provider"] == .string("gemini"))
-        #expect(modelOptions["temperature"] == .double(0.7))
-        #expect(modelOptions["max_output_tokens"] == .int(4096))
-        #expect(modelOptions["thinking_level"] == .string("high"))
+        #expect(model["provider"] == .string("gemini"))
+        #expect(model["model_id"] == .string("gemini-live"))
+        #expect(model["temperature"] == .double(0.7))
+        #expect(model["max_output_tokens"] == .int(4096))
+        #expect(model["thinking_level"] == .string("high"))
         #expect(
             agent["voice"]
                 == .object([
@@ -130,7 +120,7 @@ struct SessionConfigTests {
         // Audio is agent config, so the audio block nests under `agent`.
         #expect(
             agent["audio"]
-                == .object(["output": .bool(false), "noise_cancellation": .bool(true)])
+                == .object(["output": .bool(false), "noise_cancellation": .string("voice_focus")])
         )
         // Session-scoped knobs nest under `session`; resume_session_id rides
         // under the experimental knobs object inside it.
@@ -163,60 +153,74 @@ struct SessionConfigTests {
     func geminiEndpointingKnobsSerialize() throws {
         let fields = try encodedFields(
             SessionConfig(
-                modelOptions: .gemini(
-                    includeThoughts: false,
-                    endOfSpeechSensitivity: .high,
-                    silenceDurationMs: 200,
-                    prefixPaddingMs: 100
-                )
+                model: .gemini(
+                    .init(
+                        includeThoughts: false,
+                        endOfSpeechSensitivity: .high,
+                        silenceDurationMs: 200,
+                        prefixPaddingMs: 100
+                    ))
             )
         )
         guard let agent = object(fields, "agent"),
-            let modelOptions = object(agent, "model_options")
+            let model = object(agent, "model")
         else {
-            Issue.record("expected a model_options sub-object under agent")
+            Issue.record("expected a model sub-object under agent")
             return
         }
-        #expect(modelOptions["provider"] == .string("gemini"))
-        #expect(modelOptions["include_thoughts"] == .bool(false))
-        #expect(modelOptions["end_of_speech_sensitivity"] == .string("high"))
-        #expect(modelOptions["silence_duration_ms"] == .int(200))
-        #expect(modelOptions["prefix_padding_ms"] == .int(100))
-        #expect(modelOptions["temperature"] == nil)
+        #expect(model["provider"] == .string("gemini"))
+        #expect(model["include_thoughts"] == .bool(false))
+        #expect(model["end_of_speech_sensitivity"] == .string("high"))
+        #expect(model["silence_duration_ms"] == .int(200))
+        #expect(model["prefix_padding_ms"] == .int(100))
+        #expect(model["temperature"] == nil)
+        #expect(model["model_id"] == nil)
+    }
+
+    @Test("the string case crosses the wire as a bare model string, not a block")
+    func modelIdSerializesAsString() throws {
+        let fields = try encodedFields(SessionConfig(model: .id("gemini-live")))
+        guard let agent = object(fields, "agent") else {
+            Issue.record("expected an agent sub-object")
+            return
+        }
+        #expect(agent["model"] == .string("gemini-live"))
     }
 
     @Test("Gemini cosmoVad selection and its tuning block serialize under their wire names")
     func geminiCosmoVadSerializes() throws {
         let fields = try encodedFields(
             SessionConfig(
-                modelOptions: .gemini(
-                    turnDetection: .cosmoVad(pauseMs: 250, prefixMs: 300, maxHoldMs: 900)
-                )
+                model: .gemini(
+                    .init(
+                        turnDetection: .cosmoVad,
+                        cosmoVad: .init(pauseMs: 250, prefixMs: 300, maxHoldMs: 900)
+                    ))
             )
         )
         guard let agent = object(fields, "agent"),
-            let modelOptions = object(agent, "model_options")
+            let model = object(agent, "model")
         else {
-            Issue.record("expected a model_options sub-object under agent")
+            Issue.record("expected a model sub-object under agent")
             return
         }
-        #expect(modelOptions["turn_detection"] == .string("cosmo_vad"))
+        #expect(model["turn_detection"] == .string("cosmo_vad"))
         #expect(
-            modelOptions["cosmo_vad"]
+            model["cosmo_vad"]
                 == .object([
                     "pause_ms": .int(250),
                     "prefix_ms": .int(300),
                     "max_hold_ms": .int(900),
                 ]))
-        #expect(modelOptions["silence_duration_ms"] == nil)
+        #expect(model["silence_duration_ms"] == nil)
 
         let serverVad = try encodedFields(
-            SessionConfig(modelOptions: .gemini(turnDetection: .serverVad))
+            SessionConfig(model: .gemini(.init(turnDetection: .serverVad)))
         )
         guard let serverAgent = object(serverVad, "agent"),
-            let serverOptions = object(serverAgent, "model_options")
+            let serverOptions = object(serverAgent, "model")
         else {
-            Issue.record("expected a model_options sub-object under agent")
+            Issue.record("expected a model sub-object under agent")
             return
         }
         #expect(serverOptions["turn_detection"] == .string("server_vad"))
@@ -225,47 +229,76 @@ struct SessionConfigTests {
 
     @Test("an unconfigured OpenAI block carries only the discriminator")
     func openAIDefaultsStayAbsent() throws {
-        let fields = try encodedFields(SessionConfig(modelOptions: .openai()))
+        let fields = try encodedFields(SessionConfig(model: .openai(.init())))
         guard let agent = object(fields, "agent") else {
             Issue.record("expected an agent sub-object")
             return
         }
-        #expect(agent["model_options"] == .object(["provider": .string("openai")]))
+        #expect(agent["model"] == .object(["provider": .string("openai")]))
     }
 
     @Test("each OpenAI turn detector serializes only the knobs it reads")
     func openAITurnDetectionSerializes() throws {
         let serverVad = try encodedFields(
             SessionConfig(
-                modelOptions: .openai(
-                    turnDetection: .serverVad(silenceDurationMs: 200, prefixPaddingMs: 100)
-                )
+                model: .openai(
+                    .init(
+                        turnDetection: .serverVad,
+                        silenceDurationMs: 200,
+                        prefixPaddingMs: 100
+                    ))
             )
         )
         guard let agent = object(serverVad, "agent"),
-            let modelOptions = object(agent, "model_options")
+            let model = object(agent, "model")
         else {
-            Issue.record("expected a model_options sub-object under agent")
+            Issue.record("expected a model sub-object under agent")
             return
         }
-        #expect(modelOptions["turn_detection"] == .string("server_vad"))
-        #expect(modelOptions["silence_duration_ms"] == .int(200))
-        #expect(modelOptions["prefix_padding_ms"] == .int(100))
-        #expect(modelOptions["eagerness"] == nil)
+        #expect(model["turn_detection"] == .string("server_vad"))
+        #expect(model["silence_duration_ms"] == .int(200))
+        #expect(model["prefix_padding_ms"] == .int(100))
+        #expect(model["eagerness"] == nil)
 
         let semanticVad = try encodedFields(
-            SessionConfig(modelOptions: .openai(turnDetection: .semanticVad(eagerness: .high)))
+            SessionConfig(model: .openai(.init(turnDetection: .semanticVad, eagerness: .high)))
         )
         guard let semanticAgent = object(semanticVad, "agent"),
-            let semanticOptions = object(semanticAgent, "model_options")
+            let semanticOptions = object(semanticAgent, "model")
         else {
-            Issue.record("expected a model_options sub-object under agent")
+            Issue.record("expected a model sub-object under agent")
             return
         }
         #expect(semanticOptions["turn_detection"] == .string("semantic_vad"))
         #expect(semanticOptions["eagerness"] == .string("high"))
         #expect(semanticOptions["silence_duration_ms"] == nil)
         #expect(semanticOptions["prefix_padding_ms"] == nil)
+    }
+
+    @Test("the Grok block serializes its detector and knobs under their wire names")
+    func grokBlockSerializes() throws {
+        let fields = try encodedFields(
+            SessionConfig(
+                model: .grok(
+                    .init(
+                        modelId: "grok-voice",
+                        turnDetection: .serverVad,
+                        silenceDurationMs: 200,
+                        prefixPaddingMs: 100
+                    ))
+            )
+        )
+        guard let agent = object(fields, "agent"),
+            let model = object(agent, "model")
+        else {
+            Issue.record("expected a model sub-object under agent")
+            return
+        }
+        #expect(model["provider"] == .string("grok"))
+        #expect(model["model_id"] == .string("grok-voice"))
+        #expect(model["turn_detection"] == .string("server_vad"))
+        #expect(model["silence_duration_ms"] == .int(200))
+        #expect(model["prefix_padding_ms"] == .int(100))
     }
 
     @Test("client-tool handlers are local-only and never reach the wire")
@@ -325,9 +358,9 @@ struct SessionConfigTests {
     @Test("a stored-config field alongside a catalog launch throws instead of riding along")
     func storedConfigFieldWithCatalogAgentThrows() throws {
         let config = SessionConfig(
-            agentName: "driver-pay", audio: .init(noiseCancellation: true)
+            agentName: "driver-pay", audio: .init(noiseCancellation: .voiceFocus)
         )
-        #expect(throws: RealtimeSessionError.self) {
+        #expect(throws: SessionStateError.self) {
             try config.wirePayload()
         }
     }
@@ -352,8 +385,9 @@ extension SessionConfigTests {
         let config = SessionConfig(
             instructions: "Be helpful.",
             tools: [
-                .webSearch, .examineImage, .detectObjects, .pointAtObject,
-                .screenLocate { ScreenFixtures.capture() },
+                .webSearchTool(), .examineImageTool(), .detectObjectsTool(), .pointAtObjectTool(),
+                .endCallTool(),
+                .screenLocate { _ in ScreenFixtures.capture() },
             ]
         )
         let fields = try encodedFields(config)
@@ -379,6 +413,7 @@ extension SessionConfigTests {
                 .string("examine_image"),
                 .string("detect_objects"),
                 .string("point_at_object"),
+                .string("end_call"),
                 // The capture slot is never advertised as a client tool; what
                 // crosses the wire is the locator it asks the server to run.
                 .string("screen_locate"),

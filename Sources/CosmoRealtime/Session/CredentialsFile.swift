@@ -2,7 +2,7 @@ import Foundation
 
 /// Zero-argument credential resolution.
 ///
-/// ``RealtimeClient/Options/init(connectTimeout:requestTimeout:verifyTLS:)``
+/// ``RealtimeClient/init(connectTimeout:requestTimeout:verifyTLS:transport:)``
 /// resolves an API key from, in order: `COSMO_API_KEY` in the environment,
 /// then the `cosmo login` credentials file (`COSMO_CREDENTIALS_FILE` or
 /// `~/.cosmo/credentials`) at the profile named by `COSMO_PROFILE`. The
@@ -17,42 +17,75 @@ import Foundation
 ///
 /// Resolution semantics are pinned by the cross-SDK conformance vectors at
 /// `credentials-resolution-vectors.json`.
-public enum CredentialsError: Error, LocalizedError, Equatable {
-    /// No credential anywhere: nothing passed, `COSMO_API_KEY` unset, and
-    /// the credentials file absent. The message names every way to supply one.
-    case notFound(String)
-    /// The requested profile is not in the file; the message lists what is.
-    case profileNotFound(String)
+
+/// Why the client has no usable credential.
+///
+/// Closed: it changes only when the SDK does. The first five are the slugs the
+/// cross-SDK resolution vectors pin
+/// (`contract/credentials-resolution-vectors.json`); the rest cover a
+/// credential supplied in a way the SDK refuses to send.
+///
+/// Two are declared but unreachable here, and are members so a `switch`
+/// written against another SDK ports unchanged:
+/// ``CredentialsErrorCode/conflictingCredentials``, since `RealtimeClient`
+/// takes separate `init(apiKey:)`, `init(token:)` and `init(tokenSource:)`
+/// initializers and passing both is not expressible; and
+/// ``CredentialsErrorCode/apiKeyInTokenSlot``, which this SDK reports as a
+/// `fatalError` from a non-throwing initializer.
+public enum CredentialsErrorCode: String, Sendable, Equatable {
+    /// Nothing to authenticate with: nothing passed, `COSMO_API_KEY` unset,
+    /// and no credentials file. The message names every way to supply one.
+    case noCredential = "no_credential"
+    /// The requested profile is not in the credentials file.
+    case profileNotFound = "profile_not_found"
     /// The credentials file exists but cannot be used: not TOML, an
     /// unreadable version, or a profile missing required fields.
-    case fileInvalid(String)
+    case fileInvalid = "file_invalid"
     /// The stored API key's `expires_at` has passed; `cosmo login` mints a
     /// fresh one.
-    case expired(String)
-    /// `COSMO_BASE_URL` names a different backend than the one the stored
-    /// key was issued by; the conflict is refused up front instead of
-    /// earning an unexplained 401.
-    case baseURLMismatch(String)
+    case expired = "expired"
+    /// `COSMO_BASE_URL` names a different backend than the one the stored key
+    /// was issued by. The key would only earn a 401 there, so the conflict is
+    /// refused up front.
+    case baseURLMismatch = "base_url_mismatch"
+    /// Both an API key and a token were supplied. Pass one.
+    case conflictingCredentials = "conflicting_credentials"
+    /// A workspace API key was passed as an end-user token. The backend would
+    /// honor it as a bearer, which is how a key ends up shipped to end users,
+    /// so it is refused here.
+    case apiKeyInTokenSlot = "api_key_in_token_slot"
+    /// The base URL is plain `http` to a non-loopback host. A bearer
+    /// credential must not travel over cleartext.
+    case insecureBaseURL = "insecure_base_url"
+}
 
-    /// Stable slug shared with the cross-SDK conformance vectors.
-    public var code: String {
-        switch self {
-        case .notFound: return "no_credential"
-        case .profileNotFound: return "profile_not_found"
-        case .fileInvalid: return "file_invalid"
-        case .expired: return "expired"
-        case .baseURLMismatch: return "base_url_mismatch"
-        }
+/// The client has no usable credential.
+///
+/// Covers resolving one from the environment or the `cosmo login` credentials
+/// file, and refusing one supplied in a way that would leak it or fail on
+/// arrival. Always before a request carries the credential, but not always at
+/// the same call: the resolution codes come from the zero-argument
+/// ``RealtimeClient/init(connectTimeout:requestTimeout:verifyTLS:transport:)``,
+/// while ``CredentialsErrorCode/insecureBaseURL`` is checked where the base
+/// URL is about to be used — ``RealtimeAgent/start`` and
+/// ``TokenSource/endpoint(_:headers:)`` — since this SDK's client
+/// initializers do not throw for it.
+/// ``code`` names which — switch on it rather than matching the message.
+public struct CredentialsError: RealtimeError, LocalizedError, Sendable, Equatable {
+    /// Why the credential is unusable. A closed set this SDK throws — switch
+    /// on it.
+    public let code: CredentialsErrorCode
+    /// Human-readable explanation, for logs and display.
+    public let message: String
+
+    /// A credential refusal with its cross-SDK code and message.
+    public init(code: CredentialsErrorCode, message: String) {
+        self.code = code
+        self.message = message
     }
 
-    public var errorDescription: String? {
-        switch self {
-        case .notFound(let message), .profileNotFound(let message),
-             .fileInvalid(let message), .expired(let message),
-             .baseURLMismatch(let message):
-            return message
-        }
-    }
+    /// The message, for `LocalizedError` presentation.
+    public var errorDescription: String? { message }
 }
 
 struct ResolvedCredential: Equatable {
@@ -99,8 +132,9 @@ enum CredentialsFile {
         {
             return nil
         } catch {
-            throw CredentialsError.fileInvalid(
-                "Cannot read \(path): \(error.localizedDescription) "
+            throw CredentialsError(
+                code: .fileInvalid,
+                message: "Cannot read \(path): \(error.localizedDescription) "
                     + "Fix its permissions, or point \(fileEnvVar) elsewhere."
             )
         }
@@ -125,8 +159,9 @@ enum CredentialsFile {
 
         let profile = environment[profileEnvVar].flatMap { $0.isEmpty ? nil : $0 } ?? defaultProfile
         guard let fileText else {
-            throw CredentialsError.notFound(
-                "No Cosmo credential found. Pass an apiKey or token, set \(apiKeyEnvVar), "
+            throw CredentialsError(
+                code: .noCredential,
+                message: "No Cosmo credential found. Pass an apiKey or token, set \(apiKeyEnvVar), "
                     + "or sign in with: cosmo login (credentials file checked: \(pathDisplay))"
             )
         }
@@ -153,8 +188,9 @@ enum CredentialsFile {
         envBase: String?, storedBase: String, profile: String, pathDisplay: String
     ) throws {
         guard let envBase, originKey(envBase) != originKey(storedBase) else { return }
-        throw CredentialsError.baseURLMismatch(
-            "COSMO_BASE_URL is \(envBase), but the stored key for profile "
+        throw CredentialsError(
+            code: .baseURLMismatch,
+            message: "COSMO_BASE_URL is \(envBase), but the stored key for profile "
                 + "'\(profile)' was issued by \(storedBase) (\(pathDisplay)). "
                 + "Unset COSMO_BASE_URL, sign in against \(envBase) with `cosmo login`, "
                 + "or pass a key for that backend explicitly / via COSMO_API_KEY."
@@ -191,8 +227,9 @@ enum CredentialsFile {
 
         guard let entry = document.tables[profile] else {
             let present = document.tables.keys.sorted().joined(separator: ", ")
-            throw CredentialsError.profileNotFound(
-                "No '\(profile)' credentials in \(pathDisplay). "
+            throw CredentialsError(
+                code: .profileNotFound,
+                message: "No '\(profile)' credentials in \(pathDisplay). "
                     + "Profiles present: \(present.isEmpty ? "(none)" : present). Run: cosmo login"
             )
         }
@@ -207,8 +244,9 @@ enum CredentialsFile {
             }
         }
         guard missing.isEmpty else {
-            throw CredentialsError.fileInvalid(
-                "Profile '\(profile)' in \(pathDisplay) is missing: "
+            throw CredentialsError(
+                code: .fileInvalid,
+                message: "Profile '\(profile)' in \(pathDisplay) is missing: "
                     + "\(missing.joined(separator: ", ")). Run: cosmo login"
             )
         }
@@ -219,20 +257,23 @@ enum CredentialsFile {
         _ version: TomlSubset.Value?, pathDisplay: String
     ) throws {
         guard let version else {
-            throw CredentialsError.fileInvalid(
-                "\(pathDisplay) predates the versioned credentials format. "
+            throw CredentialsError(
+                code: .fileInvalid,
+                message: "\(pathDisplay) predates the versioned credentials format. "
                     + "Run: cosmo login (rewrites it, keeping a .bak copy)"
             )
         }
         guard case .integer(let number) = version, number >= 1 else {
-            throw CredentialsError.fileInvalid(
-                "\(pathDisplay): 'version' must be a positive integer, found \(version.described). "
+            throw CredentialsError(
+                code: .fileInvalid,
+                message: "\(pathDisplay): 'version' must be a positive integer, found \(version.described). "
                     + "Move it aside or delete it, then run: cosmo login"
             )
         }
         if number > credentialsVersion {
-            throw CredentialsError.fileInvalid(
-                "\(pathDisplay) was written by a newer Cosmo CLI (format \(number); this SDK "
+            throw CredentialsError(
+                code: .fileInvalid,
+                message: "\(pathDisplay) was written by a newer Cosmo CLI (format \(number); this SDK "
                     + "understands \(credentialsVersion)). Update the CosmoRealtime package."
             )
         }
@@ -242,14 +283,16 @@ enum CredentialsFile {
         expiresAt: String, profile: String, pathDisplay: String, now: Date
     ) throws {
         guard let expiry = parseRfc3339(expiresAt) else {
-            throw CredentialsError.fileInvalid(
-                "Profile '\(profile)' in \(pathDisplay) has an unreadable expires_at: "
+            throw CredentialsError(
+                code: .fileInvalid,
+                message: "Profile '\(profile)' in \(pathDisplay) has an unreadable expires_at: "
                     + "'\(expiresAt)'. Run: cosmo login"
             )
         }
         if now >= expiry {
-            throw CredentialsError.expired(
-                "The stored API key for profile '\(profile)' expired at \(expiresAt) "
+            throw CredentialsError(
+                code: .expired,
+                message: "The stored API key for profile '\(profile)' expired at \(expiresAt) "
                     + "(\(pathDisplay)). Run: cosmo login"
             )
         }
@@ -292,8 +335,10 @@ enum TomlSubset {
     }
 
     private static func invalid(_ pathDisplay: String, _ lineNo: Int, _ reason: String) -> CredentialsError {
-        .fileInvalid(
-            "\(pathDisplay) is not a readable credentials file (line \(lineNo): \(reason)). "
+        CredentialsError(
+            code: .fileInvalid,
+            message: "\(pathDisplay) is not a readable credentials file "
+                + "(line \(lineNo): \(reason)). "
                 + "Move it aside or delete it, then run: cosmo login"
         )
     }

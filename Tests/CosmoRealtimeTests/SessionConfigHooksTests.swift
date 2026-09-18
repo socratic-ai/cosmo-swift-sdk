@@ -27,8 +27,8 @@ struct SessionConfigHooksTests {
         var registryB: [Hook] = []
         registryB.append(sessionStart { _ in SessionStartResult(additionalContext: "B") })
 
-        let configA = SessionConfig(model: "gemini-live", instructions: "sys", hooks: registryA)
-        let configB = SessionConfig(model: "gemini-live", instructions: "sys", hooks: registryB)
+        let configA = SessionConfig(model: .id("gemini-live"), instructions: "sys", hooks: registryA)
+        let configB = SessionConfig(model: .id("gemini-live"), instructions: "sys", hooks: registryB)
         #expect(configA == configB)
     }
 

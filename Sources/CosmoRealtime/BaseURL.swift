@@ -6,21 +6,28 @@ import os
 /// Reads `COSMO_BASE_URL` — the same variable the Python and TypeScript SDKs
 /// read — and falls back to production. An app that pairs a stored credential
 /// with the backend it was issued for (the Mac app's keychain entry) passes
-/// ``RealtimeClient/Options/baseURL`` explicitly instead; a process
+/// ``RealtimeClient/baseURL`` explicitly instead; a process
 /// environment is not where a GUI app's backend choice lives.
 public enum RealtimeBaseURL {
+    /// The backend a client talks to when neither a caller nor the
+    /// environment names one.
     public static let productionBaseURL = URL(string: "https://platform.askcosmo.ai")!
+    /// The environment variable consulted first, ahead of production.
     public static let environmentVariable = "COSMO_BASE_URL"
 
     private static let log = Logger(
         subsystem: CosmoRealtimeLog.subsystem, category: "client"
     )
 
-    /// A URL no ``RealtimeAgent/start(resumeSessionId:maxSessionSeconds:storeRecording:storeAudio:storeTranscript:storeVideo:micMuted:rpcHandlers:)`` will
+    /// A URL no ``RealtimeAgent/start(resumeSessionId:maxSessionSeconds:storeRecording:storeAudio:storeTranscript:storeVideo:micMuted:rpcHandlers:onStateChange:)`` will
     /// accept, so an unparseable `COSMO_BASE_URL` fails loudly at session start
     /// rather than silently opening a session against production.
     private static let unparseable = URL(string: "cosmo:invalid-base-url")!
 
+    /// The backend to use: `COSMO_BASE_URL` when set and parseable,
+    /// production otherwise. An unparseable value resolves to a URL no
+    /// session will accept, so the mistake surfaces at session start
+    /// rather than opening a session against production.
     public static func resolve() -> URL {
         resolve(environment: ProcessInfo.processInfo.environment)
     }

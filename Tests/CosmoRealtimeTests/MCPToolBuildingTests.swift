@@ -75,12 +75,14 @@ struct MCPToolBuildingTests {
         let (tools, skipped) = buildMCPTools([server("fs", [info("read")])], reservedNames: [])
         #expect(skipped.isEmpty)
         #expect(tools.count == 1)
-        guard case let .client(name, _, parameters, handler) = tools[0] else {
+        guard case let .client(name, _, parameters, _) = tools[0].payload else {
             Issue.record("expected .client"); return
         }
         #expect(name == "mcp__fs__read")
         #expect(parameters["type"] == .string("object"))
-        #expect(handler != nil)
+        // Nothing asserted about the handler: it is non-optional on `.client`,
+        // so its presence is a type fact, and `handlerProxiesAndMapsResult`
+        // covers what it does.
     }
 
     @Test func handlerProxiesAndMapsResult() async throws {
@@ -90,7 +92,7 @@ struct MCPToolBuildingTests {
             return MCPCallResult(isError: false, text: "file-body", structuredJSON: nil)
         })
         let (tools, _) = buildMCPTools([srv], reservedNames: [])
-        guard case let .client(_, _, _, handler) = tools[0], let handler else {
+        guard case let .client(_, _, _, handler) = tools[0].payload else {
             Issue.record("no handler"); return
         }
         let out = try await handler(["p": .string("x")])
@@ -102,10 +104,10 @@ struct MCPToolBuildingTests {
             MCPCallResult(isError: true, text: "boom", structuredJSON: nil)
         })
         let (tools, _) = buildMCPTools([srv], reservedNames: [])
-        guard case let .client(_, _, _, handler) = tools[0], let handler else {
+        guard case let .client(_, _, _, handler) = tools[0].payload else {
             Issue.record("no handler"); return
         }
-        await #expect(throws: MCPToolError.self) { _ = try await handler([:]) }
+        await #expect(throws: McpError.self) { _ = try await handler([:]) }
     }
 
     @Test func mapResultPrefersStructured() throws {
@@ -147,7 +149,7 @@ struct MCPToolBuildingTests {
         // collides with the just-accepted peer (the "each other" branch).
         let (tools, skipped) = buildMCPTools([server("fs", [info("read"), info("read")])], reservedNames: [])
         #expect(tools.count == 1)
-        if case let .client(name, _, _, _) = tools[0] { #expect(name == "mcp__fs__read") } else { Issue.record("expected .client") }
+        if case let .client(name, _, _, _) = tools[0].payload { #expect(name == "mcp__fs__read") } else { Issue.record("expected .client") }
         #expect(skipped == [SkippedTool(server: "fs", tool: "read", reason: "name_collision")])
     }
 }

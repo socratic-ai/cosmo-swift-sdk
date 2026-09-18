@@ -38,21 +38,20 @@ import Testing
 }
 
 extension SessionStartRejectionTests {
-    @Test("handshakeFailed exposes the rejection code for programmatic branching")
-    func handshakeFailedExposesCode() {
-        let error = RealtimeSessionError.handshakeFailed(
+    @Test("a rejection exposes its code and the server's slug for branching")
+    func rejectionExposesCode() {
+        // 422 with a config slug classifies as `config`; the server's own slug
+        // stays readable beside it.
+        let error = SessionStartError(
+            code: classifyStartRejection(serverCode: "invalid_tool_config", status: 422),
+            message: "Tool 'escalate' references queue X which does not exist.",
             status: 422,
-            code: "invalid_tool_config",
-            detail: "Tool 'escalate' references queue X which does not exist."
+            serverCode: "invalid_tool_config"
         )
-        guard case .handshakeFailed(let status, let code, _) = error else {
-            Issue.record("expected handshakeFailed")
-            return
-        }
-        #expect(status == 422)
-        #expect(code == "invalid_tool_config")
+        #expect(error.code == .config)
+        #expect(error.status == 422)
+        #expect(error.serverCode == "invalid_tool_config")
         #expect(error.errorDescription ==
-            "Session start rejected (HTTP 422, invalid_tool_config): "
-            + "Tool 'escalate' references queue X which does not exist.")
+            "config: Tool 'escalate' references queue X which does not exist.")
     }
 }

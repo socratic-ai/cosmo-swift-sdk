@@ -18,26 +18,25 @@ extension RealtimeSession {
     /// microphone is silenced and the agent hears exactly the pushed buffers;
     /// ``stopAudioStream()`` gives it back. The server-side mute gate is
     /// cleared as part of the publish. Throws
-    /// ``RealtimeSessionError/audioPublishAlreadyActive`` while a stream is
-    /// already running, and ``RealtimeSessionError/notConnected`` outside a
+    /// ``SessionStateError`` while a stream is
+    /// already running, and ``SessionStateError`` outside a
     /// live session.
     public func startAudioStream() async throws {
+        await beginAudioStreamOperation()
+        defer { endAudioStreamOperation() }
         try _assertSendable()
         try await transport.startAudioStream()
         do {
-            try await setMuted(false)
+            try await _setMuted(false)
         } catch {
-            // The stream published the local audio track to reach the wire.
-            // Leaving it published on a failed start would hand the agent a
-            // live microphone while reporting the start as failed.
             await transport.stopAudioStream()
             throw error
         }
     }
 
-    /// Push one buffer into the running stream. Safe to call from an
-    /// audio-render thread. Buffers are resampled to the engine's format,
-    /// and a push with no stream running is inert.
+    /// Push one buffer into the running stream. The call may resample and copy
+    /// the buffer synchronously; call it from a capture queue, not an audio
+    /// render callback. A push with no stream running is inert.
     public nonisolated func pushAudioBuffer(_ buffer: AVAudioPCMBuffer) {
         transport.pushAudioBuffer(buffer)
     }
@@ -49,9 +48,11 @@ extension RealtimeSession {
     /// ``micMuted`` — is left with none, and the server gate closes behind it.
     /// One that did keeps it, gate open.
     public func stopAudioStream() async {
+        await beginAudioStreamOperation()
+        defer { endAudioStreamOperation() }
         let microphoneHasVoice = await transport.stopAudioStream()
         do {
-            try await setMuted(!microphoneHasVoice)
+            try await _setMuted(!microphoneHasVoice)
         } catch {
             // The track is already unpublished, so the agent hears nothing
             // either way; the gate is the server's view of that.
@@ -59,5 +60,23 @@ extension RealtimeSession {
                 "audio stream stopped but the mute gate did not follow: \(error.localizedDescription, privacy: .public)"
             )
         }
+    }
+
+    func beginAudioStreamOperation() async {
+        if audioStreamOperationRunning {
+            await withCheckedContinuation { continuation in
+                audioStreamOperationWaiters.append(continuation)
+            }
+        } else {
+            audioStreamOperationRunning = true
+        }
+    }
+
+    func endAudioStreamOperation() {
+        guard !audioStreamOperationWaiters.isEmpty else {
+            audioStreamOperationRunning = false
+            return
+        }
+        audioStreamOperationWaiters.removeFirst().resume()
     }
 }

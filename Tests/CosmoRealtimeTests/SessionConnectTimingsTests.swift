@@ -12,7 +12,7 @@ struct SessionConnectTimingsTests {
 
     private func makeTransport() -> LiveKitSessionTransport {
         LiveKitSessionTransport(
-            options: RealtimeClient.Options(
+            client: RealtimeClient(
                 apiKey: "test-key"
             )
         )
@@ -26,7 +26,68 @@ struct SessionConnectTimingsTests {
         #expect(t.roomMs == nil)
         #expect(t.micMs == nil)
         #expect(t.totalConnectMs == nil)
+        #expect(t.readyMs == nil)
         #expect(t.serverTimings == nil)
+    }
+
+    @Test("the ready mark measures from the handshake origin")
+    func markMeasuresFromTheHandshakeOrigin() {
+        let transport = makeTransport()
+        let session = RealtimeSession(transport: transport)
+        let t0 = Date()
+        transport.timings.setHandshakeStart(t0)
+        transport.timings.markReady(at: t0.addingTimeInterval(1.180))
+
+        #expect(abs((session.connectTimings.readyMs ?? 0) - 1180) < 0.01)
+    }
+
+    @Test("the first mark wins — a reconnect repeats the wire event")
+    func firstMarkWins() {
+        let transport = makeTransport()
+        let t0 = Date()
+        transport.timings.setHandshakeStart(t0)
+        transport.timings.markReady(at: t0.addingTimeInterval(1.180))
+        transport.timings.markReady(at: t0.addingTimeInterval(9.000))
+
+        #expect(abs((transport.connectTimings.readyMs ?? 0) - 1180) < 0.01)
+    }
+
+    @Test("a mark with no handshake origin is dropped rather than invented")
+    func markWithoutOriginIsDropped() {
+        let transport = makeTransport()
+        transport.timings.markReady()
+
+        #expect(transport.connectTimings.readyMs == nil)
+    }
+
+    @Test("a ready marked before the phases land keeps both")
+    func readyMarkedBeforeConnectPhases() {
+        let transport = makeTransport()
+        let t0 = Date()
+        transport.timings.setHandshakeStart(t0)
+        transport.timings.markReady(at: t0.addingTimeInterval(1.180))
+        transport.timings.setConnectPhases(wsMs: 100, roomMs: 300, micMs: 150, totalMs: 550)
+
+        let t = transport.connectTimings
+        #expect(t.wsMs == 100)
+        #expect(t.totalConnectMs == 550)
+        #expect(abs((t.readyMs ?? 0) - 1180) < 0.01)
+    }
+
+    @Test("the ready frame lands its mark")
+    func markLandsFromTheWire() async throws {
+        let transport = FakeSessionTransport()
+        let session = RealtimeSession(transport: transport)
+        try await session._start(config: SessionConfig(), rpcHandlers: [:])
+        #expect(session.connectTimings.readyMs == nil)
+
+        await transport.inject(Data(#"{"type":"ready","session_id":"s-1"}"#.utf8))
+        let marked = try #require(session.connectTimings.readyMs)
+
+        // A repeated ready must not move the mark.
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        await transport.inject(Data(#"{"type":"ready","session_id":"s-1"}"#.utf8))
+        #expect(session.connectTimings.readyMs == marked)
     }
 
     @Test("session passes the transport's connect phases through")
@@ -113,7 +174,7 @@ struct SessionConnectTimingsTests {
                 livekitUrl: "ws://fake.invalid",
                 roomName: "room-7",
                 sessionId: "session-7",
-                timings: RealtimeSessionStartTimings(
+                timings: .init(RealtimeSessionStartTimings(
                     dbInsertMs: 4,
                     dispatchMs: 6,
                     mintTokensMs: 5,
@@ -121,7 +182,7 @@ struct SessionConnectTimingsTests {
                     providerResolveMs: 3,
                     totalMs: 7,
                     versionCheckMs: 1
-                ),
+                )),
                 token: "token-7"
             )
         )

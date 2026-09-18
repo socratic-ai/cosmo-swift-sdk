@@ -15,16 +15,34 @@ actor FakeSessionTransport: SessionTransport {
     private(set) var micEnabled: Bool?
     private(set) var connectedMicMuted: Bool?
     private(set) var registeredToolHandlers: [String: ClientToolHandler] = [:]
+    var registeredHookExemptMethods: Set<String> = []
+    nonisolated let supportsByteStreams: Bool
+
+    init(supportsByteStreams: Bool = true) {
+        self.supportsByteStreams = supportsByteStreams
+    }
+
     private(set) var registeredBackgroundToolHandlers: [String: BackgroundClientToolHandler] = [:]
     private(set) var clientToolJobSink: ClientToolJobSink?
     private var callbacks: SessionTransportCallbacks?
     private var scriptedRejection: SessionStartFailure?
     private var scriptedMicError: Error?
     private var scriptedSendError: Error?
+    private var scriptedConnectFrames: [Data] = []
+    private var scriptedConnectPhases: (ws: Double, room: Double, mic: Double, total: Double)?
+    private var suspendNextAudioStreamStart = false
+    private var audioStreamStartContinuation: CheckedContinuation<Void, Never>?
+    private var suspendNextAudioStreamStop = false
+    private var audioStreamStopContinuation: CheckedContinuation<Void, Never>?
 
-    /// Start response the fake reports; ``timings`` stays nil so tests that
-    /// care about the server breakdown opt in by overriding it. Lock-backed
-    /// so the nonisolated ``connectTimings`` can read it.
+    /// The fake measures no phases of its own; it starts the handshake clock
+    /// and records the server breakdown off the start response, so the marks
+    /// the session adds later measure from a real origin.
+    nonisolated let timings = SessionConnectTimingsRecorder()
+
+    /// Start response the fake reports; its server breakdown stays nil so
+    /// tests that care opt in by overriding the response. Lock-backed so a
+    /// nonisolated caller can read it.
     nonisolated let startResponseBox = OSAllocatedUnfairLock(
         initialState: RealtimeSessionResponse(
             livekitUrl: "ws://fake.invalid",
@@ -46,10 +64,48 @@ actor FakeSessionTransport: SessionTransport {
         scriptedMicError = error
     }
 
+    func suspendAudioStreamStart() {
+        suspendNextAudioStreamStart = true
+    }
+
+    func audioStreamStartIsSuspended() -> Bool {
+        audioStreamStartContinuation != nil
+    }
+
+    func resumeAudioStreamStart() {
+        audioStreamStartContinuation?.resume()
+        audioStreamStartContinuation = nil
+    }
+
+    func suspendAudioStreamStop() {
+        suspendNextAudioStreamStop = true
+    }
+
+    func audioStreamStopIsSuspended() -> Bool {
+        audioStreamStopContinuation != nil
+    }
+
+    func resumeAudioStreamStop() {
+        audioStreamStopContinuation?.resume()
+        audioStreamStopContinuation = nil
+    }
+
     /// Fail the next wire send — the path ``setMuted`` rides, so a test can
     /// refuse the mute gate without touching the microphone.
     func scriptSendError(_ error: Error) {
         scriptedSendError = error
+    }
+
+    /// Deliver a server frame from inside ``connect``, before it returns — the
+    /// window in which a frame can beat the connect phases onto the recorder.
+    func scriptFrameDuringConnect(_ frame: Data) {
+        scriptedConnectFrames.append(frame)
+    }
+
+    /// Record connect phases the way the real transport does: at the end of
+    /// ``connect``, after any frame the join already delivered.
+    func scriptConnectPhases(ws: Double, room: Double, mic: Double, total: Double) {
+        scriptedConnectPhases = (ws, room, mic, total)
     }
 
     func connect(
@@ -59,8 +115,10 @@ actor FakeSessionTransport: SessionTransport {
         backgroundClientToolHandlers: [String: BackgroundClientToolHandler],
         clientToolJobSink: ClientToolJobSink?,
         hooks: HookEngine?,
+        hookExemptMethods: Set<String>,
         micMuted: Bool
     ) async throws -> SessionStartInfo {
+        timings.setHandshakeStart(Date())
         sent.append(configFrame)
         connectedMicMuted = micMuted
         // The real transport publishes the microphone during the join unless
@@ -71,9 +129,22 @@ actor FakeSessionTransport: SessionTransport {
         }
         self.callbacks = callbacks
         self.registeredToolHandlers = clientToolHandlers
+        self.registeredHookExemptMethods = hookExemptMethods
         self.registeredBackgroundToolHandlers = backgroundClientToolHandlers
         self.clientToolJobSink = clientToolJobSink
-        return SessionStartInfo(response: startResponseBox.withLock { $0 })
+        for frame in scriptedConnectFrames {
+            await callbacks.onFrame(frame)
+        }
+        if let phases = scriptedConnectPhases {
+            timings.setConnectPhases(
+                wsMs: phases.ws, roomMs: phases.room, micMs: phases.mic, totalMs: phases.total
+            )
+        }
+        let response = startResponseBox.withLock { $0 }
+        if let serverTimings = response.timings {
+            timings.setServerTimings(RealtimeSessionStartTimings(serverTimings))
+        }
+        return SessionStartInfo(sessionId: response.sessionId)
     }
 
     func send(frame: Data) async throws {
@@ -96,7 +167,38 @@ actor FakeSessionTransport: SessionTransport {
         micEnabled = enabled
     }
 
-    func close() async {}
+    private(set) var closed = false
+    /// Set the moment ``close`` is entered, before it suspends — so a test
+    /// can tell "teardown started" from "teardown finished".
+    private(set) var closeStarted = false
+    private var suspendNextClose = false
+    private var closeGate: CheckedContinuation<Void, Never>?
+
+    /// Hold the next ``close`` open until ``resumeClose``. Lets a test pin
+    /// what may and may not be observable while teardown is still running.
+    func suspendClose() {
+        suspendNextClose = true
+    }
+
+    func closeIsSuspended() -> Bool {
+        closeGate != nil
+    }
+
+    func resumeClose() {
+        closeGate?.resume()
+        closeGate = nil
+    }
+
+    func close() async {
+        closeStarted = true
+        if suspendNextClose {
+            suspendNextClose = false
+            await withCheckedContinuation { continuation in
+                closeGate = continuation
+            }
+        }
+        closed = true
+    }
 
     // No test exercises audio levels; an empty finished stream satisfies
     // the protocol and keeps the suite compiling.
@@ -133,10 +235,22 @@ actor FakeSessionTransport: SessionTransport {
         micWasPublishingBeforeStream = micEnabled ?? false
         try await setMicrophoneEnabled(true)
         audioStreamActive = true
+        if suspendNextAudioStreamStart {
+            suspendNextAudioStreamStart = false
+            await withCheckedContinuation { continuation in
+                audioStreamStartContinuation = continuation
+            }
+        }
     }
     nonisolated func pushAudioBuffer(_ buffer: AVAudioPCMBuffer) {}
     @discardableResult
     func stopAudioStream() async -> Bool {
+        if suspendNextAudioStreamStop {
+            suspendNextAudioStreamStop = false
+            await withCheckedContinuation { continuation in
+                audioStreamStopContinuation = continuation
+            }
+        }
         guard audioStreamActive else { return false }
         audioStreamActive = false
         guard micWasPublishingBeforeStream else {
@@ -146,23 +260,21 @@ actor FakeSessionTransport: SessionTransport {
         return true
     }
 
-    // The fake measures no connect phases; server timings ride the start
-    // response, so tests that care set them via ``setStartResponse``.
-    nonisolated var connectTimings: SessionConnectTimings {
-        SessionConnectTimings(
-            wsMs: nil, roomMs: nil, micMs: nil, totalConnectMs: nil,
-            serverTimings: startResponseBox.withLock { $0.timings }
-        )
-    }
-
     /// Deliver one raw server frame, awaiting the session's handling so
     /// injection order is processing order.
-    func simulateClose(_ reason: RealtimeSession.EndReason) async {
+    func simulateClose(_ reason: RealtimeSession.CloseReason) async {
         await callbacks?.onClosed(reason)
     }
 
     func inject(_ data: Data) async {
         await callbacks?.onFrame(data)
+    }
+
+    /// Drive the transport-drop callbacks the way the real transport does: a
+    /// reconnecting notice followed by the recovered connection.
+    func simulateReconnect() async {
+        await callbacks?.onReconnecting()
+        await callbacks?.onReconnected()
     }
 
     /// Fire the agent-track readiness signal (what the LiveKit transport calls

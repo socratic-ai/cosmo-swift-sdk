@@ -126,7 +126,9 @@ struct TokenSourceTests {
 }
 
 /// The endpoint constructor's wire seams: the request it POSTs and the
-/// response mapping onto ``MintedToken`` / ``MintTokenError``.
+/// response mapping onto ``MintedToken`` / ``TokenSourceError``. The
+/// construction-time URL guard runs before any of that and reports
+/// ``CredentialsError`` — nothing has been sent, so nothing has failed.
 @Suite("TokenSource endpoint wire")
 struct TokenSourceEndpointWireTests {
 
@@ -144,10 +146,8 @@ struct TokenSourceEndpointWireTests {
         #expect {
             _ = try TokenSource.endpoint(URL(string: urlString)!)
         } throws: { error in
-            guard case .rejected(let code, let detail) = error as? MintTokenError else {
-                return false
-            }
-            return code == "token_source_failed" && detail.contains("https")
+            guard let error = error as? CredentialsError else { return false }
+            return error.code == .insecureBaseURL && error.message.contains("https")
         }
     }
 
@@ -162,6 +162,37 @@ struct TokenSourceEndpointWireTests {
     )
     func secureURLsAccepted(urlString: String) throws {
         _ = try TokenSource.endpoint(URL(string: urlString)!)
+        _ = try TokenSource.endpoint(URL(string: urlString)!, headers: { [:] })
+    }
+
+    @Test("a headers closure runs per fetch and its error surfaces before any request")
+    func headersClosureResolvedPerFetch() async throws {
+        struct RotationFailed: Error {}
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        let source = try TokenSource.endpoint(
+            Self.url,
+            headers: {
+                calls.withLock { $0 += 1 }
+                throw RotationFailed()
+            }
+        )
+        // A failed fetch caches nothing, so each call re-resolves the headers.
+        await #expect(throws: RotationFailed.self) { try await source.jwt() }
+        await #expect(throws: RotationFailed.self) { try await source.jwt() }
+        #expect(calls.withLock { $0 } == 2)
+    }
+
+    @Test("a custom fetcher returning an empty jwt is refused")
+    func customFetcherEmptyJwtRefused() async {
+        let source = TokenSource.custom {
+            MintedToken(jwt: "", expiresAt: Date().addingTimeInterval(3600))
+        }
+        await #expect {
+            _ = try await source.jwt()
+        } throws: { error in
+            guard let error = error as? TokenSourceError else { return false }
+            return error.code == .fetcherFailed && error.serverCode == nil
+        }
     }
 
     @Test("POSTs an empty JSON object body with JSON content-type")
@@ -223,7 +254,7 @@ struct TokenSourceEndpointWireTests {
     }
 
     @Test(
-        "a 2xx body missing jwt / expires_at (or not JSON) maps to token_source_failed",
+        "a 2xx body missing jwt / expires_at (or not JSON) maps to invalid_response",
         arguments: [
             "not json at all",
             #"{"jwt":"","expires_at":"2026-06-24T10:00:00Z"}"#,
@@ -235,8 +266,8 @@ struct TokenSourceEndpointWireTests {
         #expect {
             _ = try TokenSource._decodeEndpointResponse(status: 200, data: Data(body.utf8))
         } throws: { error in
-            guard case .rejected(let code, _) = error as? MintTokenError else { return false }
-            return code == "token_source_failed"
+            guard let error = error as? TokenSourceError else { return false }
+            return error.code == .invalidResponse && error.serverCode == nil
         }
     }
 
@@ -265,10 +296,10 @@ struct TokenSourceEndpointWireTests {
         #expect {
             _ = try TokenSource._decodeEndpointResponse(status: 403, data: Data(body.utf8))
         } throws: { error in
-            guard case .rejected(let code, let detail) = error as? MintTokenError else {
-                return false
-            }
-            return code == expectedCode && detail == expectedMessage
+            guard let error = error as? TokenSourceError else { return false }
+            return error.code == .requestRejected
+                && error.serverCode == expectedCode
+                && error.message == expectedMessage
         }
     }
 
@@ -279,12 +310,10 @@ struct TokenSourceEndpointWireTests {
                 status: 302, data: Data(), location: "http://evil.example.com/token"
             )
         } throws: { error in
-            guard case .rejected(let code, let detail) = error as? MintTokenError else {
-                return false
-            }
-            return code == "token_source_failed"
-                && detail.contains("redirect")
-                && detail.contains("http://evil.example.com/token")
+            guard let error = error as? TokenSourceError else { return false }
+            return error.code == .requestFailed
+                && error.message.contains("redirect")
+                && error.message.contains("http://evil.example.com/token")
         }
     }
 
@@ -313,10 +342,10 @@ struct TokenSourceEndpointWireTests {
                 status: 500, data: Data("upstream exploded".utf8)
             )
         } throws: { error in
-            guard case .rejected(let code, let detail) = error as? MintTokenError else {
-                return false
-            }
-            return code == "http_500" && detail == "upstream exploded"
+            guard let error = error as? TokenSourceError else { return false }
+            return error.code == .requestRejected
+                && error.serverCode == "http_500"
+                && error.message == "upstream exploded"
         }
     }
 }
@@ -335,16 +364,16 @@ struct TokenSourceSessionStartTests {
     }
 
     private func startRejectedSession(
-        credential: RealtimeClient.Options.Credential, status: Int
+        credential: RealtimeClient.Credential, status: Int
     ) async throws {
         let transport = FakeSessionTransport()
         await transport.scriptRejection(
             .rejected(status: status, code: nil, detail: "rejected")
         )
         let session = RealtimeSession(
-            transport: transport, options: RealtimeClient.Options(credential: credential)
+            transport: transport, client: RealtimeClient(credential: credential)
         )
-        await #expect(throws: RealtimeSessionError.self) {
+        await #expect(throws: SessionStartError.self) {
             try await session._start(config: SessionConfig())
         }
     }
@@ -373,41 +402,43 @@ struct TokenSourceSessionStartTests {
         #expect(count.withLock { $0 } == 1)
     }
 
-    @Test("a token-source failure during start surfaces the MintTokenError un-erased")
-    func credentialFailureSurfacesMintError() async throws {
-        let mintError = MintTokenError.rejected(code: "token_source_failed", detail: "fetch broke")
+    @Test("a token-source failure during start surfaces the TokenSourceError un-erased")
+    func credentialFailureSurfacesSourceError() async throws {
+        let sourceError = TokenSourceError(code: .requestFailed, message: "fetch broke")
         let transport = FakeSessionTransport()
-        await transport.scriptRejection(.credential(mintError))
+        await transport.scriptRejection(.credential(sourceError))
         let session = RealtimeSession(
             transport: transport,
-            options: RealtimeClient.Options(tokenSource: .custom { throw mintError })
+            client: RealtimeClient(tokenSource: .custom { throw sourceError })
         )
-        await #expect(throws: mintError) {
+        await #expect(throws: sourceError) {
             try await session._start(config: SessionConfig())
         }
     }
 
-    @Test("the generated client's wrapped token-source failure is recoverable with its slug")
-    func generatedClientWrapKeepsMintError() async throws {
-        let mintError = MintTokenError.rejected(code: "user_token_disabled", detail: "server said no")
-        let source = TokenSource.custom { throw mintError }
+    @Test("the generated client's wrapped token-source failure is recoverable with its code")
+    func generatedClientWrapKeepsSourceError() async throws {
+        let sourceError = TokenSourceError(
+            code: .requestRejected, message: "server said no", serverCode: "user_token_disabled"
+        )
+        let source = TokenSource.custom { throw sourceError }
         let client = CosmoRealtimeAPI.Client(
             serverURL: URL(string: "https://api.example.com")!,
             transport: StubTransport { jsonResponse(.ok, "{}") },
-            middlewares: RealtimeClient.Options(tokenSource: source)._apiMiddlewares(prepared: nil)
+            middlewares: RealtimeClient(tokenSource: source)._apiMiddlewares(prepared: nil)
         )
         do {
             _ = try await client.verifyRealtimeCredential()
             Issue.record("the credential fetch must fail the call")
         } catch {
-            #expect(LiveKitSessionTransport._mintTokenError(in: error) == mintError)
+            #expect(LiveKitSessionTransport._tokenSourceError(in: error) == sourceError)
         }
     }
 
-    @Test("_mintTokenError leaves unrelated errors alone")
-    func unrelatedErrorsNotMistakenForMintError() {
+    @Test("_tokenSourceError leaves unrelated errors alone")
+    func unrelatedErrorsNotMistakenForSourceError() {
         struct SomethingElse: Error {}
-        #expect(LiveKitSessionTransport._mintTokenError(in: SomethingElse()) == nil)
+        #expect(LiveKitSessionTransport._tokenSourceError(in: SomethingElse()) == nil)
     }
 }
 

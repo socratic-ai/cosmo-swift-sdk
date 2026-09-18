@@ -4,16 +4,21 @@ import Foundation
 /// shared surface, the tooltip to show, and — when the model could read the
 /// control's own name off the screen — what it is called.
 public struct ScreenHighlightBoxRequest: Sendable, Equatable {
+    /// Where to highlight, as fractions of the shared surface.
     public var box: ScreenBox
     /// The model's guess at what the target is *called*, distinct from the
     /// located element a handle resolves to. A host with an accessibility tree
     /// can snap the highlight onto that exact control instead of the estimated
     /// box; `nil` when the model could read no name.
     public var elementGuess: ScreenElementHint?
+    /// Tooltip text shown with the highlight.
     public var label: String
+    /// Where the tooltip sits relative to the box.
     public var placement: ScreenPlacement
+    /// The gesture the label suggests, which sets the affordance drawn.
     public var interaction: ScreenAffordance
 
+    /// A highlight request for the given box and tooltip.
     public init(
         box: ScreenBox,
         elementGuess: ScreenElementHint? = nil,
@@ -57,8 +62,12 @@ public struct ScreenHighlightOutcome: Sendable, Equatable {
         ScreenHighlightOutcome(shown: false, exact: false, reason: reason)
     }
 
+    /// Whether the highlight reached the screen.
     public let shown: Bool
+    /// Whether it landed on a real control rather than only the model's
+    /// estimated box. `false` tells the model to locate the target instead.
     public let exact: Bool
+    /// Why nothing was drawn, model-facing. `nil` when ``shown`` is `true`.
     public let reason: String?
 
     private init(shown: Bool, exact: Bool, reason: String?) {
@@ -94,6 +103,8 @@ public enum ScreenHighlightBoxTool {
     /// Tool-group key for backend telemetry + brain-allowlisting.
     public static let group = "screen"
 
+    /// The model-facing description advertised for this tool. Read it to see
+    /// what the model is told about when and how to call it.
     public static var toolDescription: String {
         """
         Highlight a target on the shared screen, given its box as fractions of the surface \
@@ -170,7 +181,7 @@ extension AgentTool {
     /// Report ``ScreenHighlightOutcome/landedOnControl`` only when you resolved
     /// the model's box to a real control; ``ScreenHighlightOutcome/landedOnEstimate``
     /// is what tells it to locate properly instead of trusting the estimate.
-    public static func screenHighlightBox(
+    static func screenHighlightBox(
         onHighlight: @escaping @Sendable (ScreenHighlightBoxRequest) async throws -> ScreenHighlightOutcome
     ) -> AgentTool {
         .sdkClient(SDKClientTool(

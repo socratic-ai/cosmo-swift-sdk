@@ -10,6 +10,22 @@ struct SessionHookFiringTests {
 
     // MARK: – Helpers
 
+    /// A started session carried through the ready gate, so what follows tests
+    /// a session that lived. A close *before* ready is the window's handshake
+    /// failure on every surface — ``ReadyWindowTests`` owns those exits.
+    private func liveSession(
+        hooks: [Hook], serverEndGraceNanos: UInt64? = nil
+    ) async throws -> (RealtimeSession, FakeSessionTransport) {
+        let transport = FakeSessionTransport()
+        let session = serverEndGraceNanos.map {
+            RealtimeSession(transport: transport, serverEndGraceNanos: $0)
+        } ?? RealtimeSession(transport: transport)
+        try await session._start(config: SessionConfig(hooks: hooks))
+        await transport.inject(Data(#"{"type":"ready","session_id":"sess-test"}"#.utf8))
+        try await session._awaitReady()
+        return (session, transport)
+    }
+
     private func decodeSentConfigFrame(_ data: Data) -> [String: JSONValue] {
         guard case .object(let fields)? = try? JSONDecoder().decode(JSONValue.self, from: data) else {
             Issue.record("configFrame did not decode as a JSON object")
@@ -190,14 +206,15 @@ struct SessionHookFiringTests {
         var hooks: [Hook] = []
         hooks.append(sessionEnd { ctx in await ctxBox.set(ctx) })
 
-        let transport = FakeSessionTransport()
-        let session = RealtimeSession(transport: transport)
-        try await session._start(config: SessionConfig(hooks: hooks))
+        let (session, transport) = try await liveSession(hooks: hooks)
         await transport.simulateClose(.serverEnded(reason: "ROOM_DELETED"))
 
         let ctx = await ctxBox.value
         #expect(ctx?.reason == .serverEnded)
         #expect(ctx?.detail == "ROOM_DELETED")
+        // The close is delivered to the session; holding it here keeps it from
+        // being released before that lands.
+        _ = session
     }
 
     @Test("a latched server session-ended reason wins over the transport close")
@@ -206,9 +223,7 @@ struct SessionHookFiringTests {
         var hooks: [Hook] = []
         hooks.append(sessionEnd { ctx in await ctxBox.set(ctx) })
 
-        let transport = FakeSessionTransport()
-        let session = RealtimeSession(transport: transport)
-        try await session._start(config: SessionConfig(hooks: hooks))
+        let (session, transport) = try await liveSession(hooks: hooks)
         let frame = Data(#"{"type":"session-ended","reason":"max_session_duration"}"#.utf8)
         await session._receiveFrame(frame)
         await transport.simulateClose(.transportError(message: "room dropped"))
@@ -224,9 +239,7 @@ struct SessionHookFiringTests {
         var hooks: [Hook] = []
         hooks.append(sessionEnd { ctx in await ctxBox.set(ctx) })
 
-        let transport = FakeSessionTransport()
-        let session = RealtimeSession(transport: transport, serverEndGraceNanos: 20_000_000)
-        try await session._start(config: SessionConfig(hooks: hooks))
+        let (session, _) = try await liveSession(hooks: hooks, serverEndGraceNanos: 20_000_000)
         let frame = Data(#"{"type":"session-ended","reason":"worker done"}"#.utf8)
         await session._receiveFrame(frame)
         // No close follows — the grace timer must force the clean teardown.

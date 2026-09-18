@@ -39,7 +39,7 @@ final class MCPProcessTransport: MCPTransport, @unchecked Sendable {
         do {
             try process.run()
         } catch {
-            throw MCPError.transport("failed to launch \(server.command): \(error.localizedDescription)")
+            throw McpError(code: .connectionFailed, message: "failed to launch \(server.command): \(error.localizedDescription)")
         }
         startReadLoop()
     }
@@ -57,7 +57,7 @@ final class MCPProcessTransport: MCPTransport, @unchecked Sendable {
             group.addTask { [state] in
                 try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                 await state.timeoutIfPending(id: id)
-                throw MCPError.transport("MCP request '\(method)' timed out after \(timeout)s")
+                throw McpError(code: .connectionFailed, message: "MCP request '\(method)' timed out after \(timeout)s")
             }
             defer { group.cancelAll() }
             return try await group.next()!
@@ -74,7 +74,7 @@ final class MCPProcessTransport: MCPTransport, @unchecked Sendable {
         if process.isRunning {
             process.terminate()
         }
-        await state.failAll(MCPError.transport("connection closed"))
+        await state.failAll(McpError(code: .connectionFailed, message: "connection closed"))
     }
 
     private func startReadLoop() {
@@ -92,11 +92,11 @@ final class MCPProcessTransport: MCPTransport, @unchecked Sendable {
                     await state.deliver(lineData: Data(lineData), log: MCPProcessTransport.log)
                 }
                 if buffer.count > maxBufferBytes {
-                    await state.failAll(MCPError.transport("MCP stdout line exceeded \(maxBufferBytes) bytes without a newline"))
+                    await state.failAll(McpError(code: .connectionFailed, message: "MCP stdout line exceeded \(maxBufferBytes) bytes without a newline"))
                     break
                 }
             }
-            await state.failAll(MCPError.transport("server closed"))
+            await state.failAll(McpError(code: .connectionFailed, message: "server closed"))
         }
     }
 
@@ -127,7 +127,7 @@ private actor TransportState {
 
     func send(id: Int, line: String, continuation: CheckedContinuation<String, Error>) {
         if closed {
-            continuation.resume(throwing: MCPError.transport("connection closed"))
+            continuation.resume(throwing: McpError(code: .connectionFailed, message: "connection closed"))
             return
         }
         pending[id] = continuation
@@ -135,7 +135,7 @@ private actor TransportState {
             try writeHandle.write(contentsOf: Data(line.utf8))
         } catch {
             pending.removeValue(forKey: id)
-            continuation.resume(throwing: MCPError.transport("write failed: \(error.localizedDescription)"))
+            continuation.resume(throwing: McpError(code: .connectionFailed, message: "write failed: \(error.localizedDescription)"))
         }
     }
 
@@ -163,7 +163,7 @@ private actor TransportState {
         let parsed = obj ?? [:]
         if let error = parsed["error"] as? [String: Any] {
             let message = (error["message"] as? String) ?? "MCP rpc error"
-            continuation.resume(throwing: MCPError.rpc(message))
+            continuation.resume(throwing: McpError(code: .serverError, message: message))
         } else if let result = parsed["result"], let data = try? JSONSerialization.data(withJSONObject: result) {
             continuation.resume(returning: String(decoding: data, as: UTF8.self))
         } else {
@@ -173,10 +173,10 @@ private actor TransportState {
 
     func timeoutIfPending(id: Int) {
         guard let continuation = pending.removeValue(forKey: id) else { return }
-        continuation.resume(throwing: MCPError.transport("request timed out"))
+        continuation.resume(throwing: McpError(code: .connectionFailed, message: "request timed out"))
     }
 
-    func failAll(_ error: MCPError) {
+    func failAll(_ error: McpError) {
         closed = true
         for (_, continuation) in pending { continuation.resume(throwing: error) }
         pending.removeAll()
@@ -184,7 +184,7 @@ private actor TransportState {
 }
 
 /// Production transport factory: spawn a real stdio subprocess per server.
-public let defaultMCPTransportFactory: MCPTransportFactory = { server in
+let defaultMCPTransportFactory: MCPTransportFactory = { server in
     try MCPProcessTransport(server: server)
 }
 
@@ -192,8 +192,8 @@ public let defaultMCPTransportFactory: MCPTransportFactory = { server in
 
 /// stdio MCP subprocesses require `Foundation.Process`, which is macOS-only, so
 /// on iOS the default factory throws instead of spawning a server.
-public let defaultMCPTransportFactory: MCPTransportFactory = { _ in
-    throw MCPError.transport("stdio MCP servers are unsupported on iOS")
+let defaultMCPTransportFactory: MCPTransportFactory = { _ in
+    throw McpError(code: .connectionFailed, message: "stdio MCP servers are unsupported on iOS")
 }
 
 #endif

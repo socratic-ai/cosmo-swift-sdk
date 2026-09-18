@@ -22,7 +22,7 @@ private let weatherInput = ToolSchema.object(
 )
 
 private func weatherTool() throws -> AgentTool {
-    try AgentTool.define(
+    try AgentTool.clientTool(
         name: "get_weather",
         description: "Current weather for a city.",
         input: weatherInput
@@ -35,11 +35,11 @@ private func weatherTool() throws -> AgentTool {
 }
 
 private func clientHandler(_ tool: AgentTool) -> ClientToolHandler? {
-    if case let .client(_, _, _, handler) = tool { return handler }
+    if case let .client(_, _, _, handler) = tool.payload { return handler }
     return nil
 }
 
-@Suite("AgentTool.define builder")
+@Suite("clientTool builder")
 struct ToolBuilderTests {
 
     // MARK: - Lowering
@@ -66,14 +66,15 @@ struct ToolBuilderTests {
                     ]),
                 ]),
                 "required": .array([.string("city")]),
-            ]
+            ],
+            handler: { _ in [:] }
         )
         #expect(defined == handWritten)
     }
 
     @Test("defineBackground lowers to the equivalent backgroundClient spec")
     func backgroundLowersToBackgroundClient() throws {
-        let defined = try AgentTool.defineBackground(
+        let defined = try AgentTool.backgroundClientTool(
             name: "export_weather",
             description: "Slow weather export.",
             input: weatherInput
@@ -202,7 +203,7 @@ struct ToolBuilderTests {
 
     @Test("nested paths are dotted and indexed")
     func nestedPathsDottedAndIndexed() async throws {
-        let tool = try AgentTool.define(
+        let tool = try AgentTool.clientTool(
             name: "place_order",
             description: "Place an order.",
             input: .object(
@@ -228,7 +229,7 @@ struct ToolBuilderTests {
     @Test("issue lines cap at five and the message stays under 1 KiB")
     func issueLinesCappedAndBounded() {
         let issues = (0..<7).map {
-            ToolInputValidationError.Issue(path: "field\($0)", code: "key_not_found", constraint: "required")
+            ToolInputIssue(path: "field\($0)", code: "key_not_found", constraint: "required")
         }
         let message = ToolInputValidationError.formatMessage(
             toolName: "wide_tool", issues: issues
@@ -239,7 +240,7 @@ struct ToolBuilderTests {
 
         let longPath = String(repeating: "p", count: 400)
         let longIssues = (0..<5).map {
-            ToolInputValidationError.Issue(path: "\(longPath)\($0)", code: "key_not_found", constraint: "required")
+            ToolInputIssue(path: "\(longPath)\($0)", code: "key_not_found", constraint: "required")
         }
         let bounded = ToolInputValidationError.formatMessage(
             toolName: "wide_tool", issues: longIssues
@@ -277,7 +278,7 @@ struct ToolBuilderTests {
     @Test("a background handler receives decoded args and the job")
     func backgroundHandlerReceivesArgsAndJob() async throws {
         let seenCity = CaptureBox<String>()
-        let tool = try AgentTool.defineBackground(
+        let tool = try AgentTool.backgroundClientTool(
             name: "export_weather",
             description: "Slow weather export.",
             input: weatherInput
@@ -285,7 +286,7 @@ struct ToolBuilderTests {
             await seenCity.set(args.city)
             await job.ack()
         }
-        guard case let .backgroundClient(_, _, _, handler) = tool else {
+        guard case let .backgroundClient(_, _, _, handler) = tool.payload else {
             Issue.record("expected a backgroundClient spec")
             return
         }
@@ -307,7 +308,7 @@ struct ToolBuilderTests {
     @Test("a bad tool name is rejected at construction")
     func badNameRejected() {
         #expect(throws: ToolDefinitionError.self) {
-            _ = try AgentTool.define(
+            _ = try AgentTool.clientTool(
                 name: "GetWeather", description: "Camel case.", input: weatherInput
             ) { (_: WeatherArgs) in [:] }
         }
@@ -315,23 +316,55 @@ struct ToolBuilderTests {
 
     @Test("a missing description is rejected at construction")
     func missingDescriptionRejected() {
+        // The type alone was already asserted before the code existed; the
+        // code is what names which rule was broken.
         #expect(throws: ToolDefinitionError.self) {
-            _ = try AgentTool.define(
+            _ = try AgentTool.clientTool(
                 name: "get_weather", description: "", input: weatherInput
             ) { (_: WeatherArgs) in [:] }
         }
+        #expect(definitionCode(description: "") == .missingDescription)
+    }
+
+    /// The code a declaration with this description is refused with, or `nil`
+    /// if it is accepted.
+    private func definitionCode(
+        name: String = "get_weather", description: String
+    ) -> ToolDefinitionErrorCode? {
+        do {
+            _ = try AgentTool.clientTool(
+                name: name, description: description, input: weatherInput
+            ) { (_: WeatherArgs) in [:] }
+            return nil
+        } catch let error as ToolDefinitionError {
+            return error.code
+        } catch {
+            return nil
+        }
+    }
+
+    @Test("each declaration rule reports its own code")
+    func declarationRulesReportTheirCodes() {
+        #expect(definitionCode(name: "Bad-Name", description: "x") == .invalidToolName)
+        #expect(definitionCode(description: "") == .missingDescription)
+        #expect(
+            definitionCode(description: String(repeating: "x", count: 2049))
+                == .descriptionTooLong
+        )
+        #expect(definitionCode(description: "bad\u{07}text") == .invalidText)
     }
 
     @Test("an overlong description reports actual and max lengths")
     func overlongDescriptionReportsActualAndMax() {
         do {
-            _ = try AgentTool.define(
+            _ = try AgentTool.clientTool(
                 name: "get_weather",
                 description: String(repeating: "x", count: 2049),
                 input: weatherInput
             ) { (_: WeatherArgs) in [:] }
             Issue.record("expected a construction error")
         } catch let error as ToolDefinitionError {
+            #expect(error.code == .descriptionTooLong)
             #expect(error.message.contains("2049"))
             #expect(error.message.contains("2048"))
         } catch {
@@ -342,7 +375,7 @@ struct ToolBuilderTests {
     @Test("a control character in the description is rejected")
     func controlCharacterDescriptionRejected() {
         #expect(throws: ToolDefinitionError.self) {
-            _ = try AgentTool.define(
+            _ = try AgentTool.clientTool(
                 name: "get_weather", description: "bad\u{07}text", input: weatherInput
             ) { (_: WeatherArgs) in [:] }
         }
@@ -353,20 +386,20 @@ struct ToolBuilderTests {
         var schema = ToolSchema.string()
         for _ in 0..<6 { schema = .object(properties: ["p": schema]) }
         do {
-            _ = try AgentTool.define(
+            _ = try AgentTool.clientTool(
                 name: "deep_tool", description: "Too deep.", input: schema
             ) { (_: WeatherArgs) in [:] }
             Issue.record("expected a schema error")
-        } catch let error as ToolSchemaError {
-            #expect(error.code == "max_depth_exceeded")
+        } catch let error as ToolDefinitionError {
+            #expect(error.code == .maxDepthExceeded)
         } catch {
-            Issue.record("expected ToolSchemaError, got \(error)")
+            Issue.record("expected ToolDefinitionError, got \(error)")
         }
 
         var atLimit = ToolSchema.string()
         for _ in 0..<5 { atLimit = .object(properties: ["p": atLimit]) }
         #expect(throws: Never.self) {
-            _ = try AgentTool.define(
+            _ = try AgentTool.clientTool(
                 name: "deep_tool", description: "At the limit.", input: atLimit
             ) { (_: WeatherArgs) in [:] }
         }
@@ -380,14 +413,14 @@ struct ToolBuilderTests {
             )
         )
         do {
-            _ = try AgentTool.define(
+            _ = try AgentTool.clientTool(
                 name: "wide_tool", description: "Too wide.", input: wide
             ) { (_: WeatherArgs) in [:] }
             Issue.record("expected a schema error")
-        } catch let error as ToolSchemaError {
-            #expect(error.code == "max_properties_exceeded")
+        } catch let error as ToolDefinitionError {
+            #expect(error.code == .maxPropertiesExceeded)
         } catch {
-            Issue.record("expected ToolSchemaError, got \(error)")
+            Issue.record("expected ToolDefinitionError, got \(error)")
         }
     }
 
@@ -401,7 +434,7 @@ struct ToolBuilderTests {
     @Test("the consistency check catches a schema/type type mismatch")
     func consistencyCheckCatchesTypeMismatch() {
         struct BadArgs: Decodable { let city: Int }
-        #expect(throws: ToolSchemaConsistencyCheck.Failure.self) {
+        #expect(throws: ToolDefinitionError.self) {
             try ToolSchemaConsistencyCheck.verify(input: weatherInput, decodesInto: BadArgs.self)
         }
     }
@@ -412,7 +445,7 @@ struct ToolBuilderTests {
             let city: String
             let unit: String
         }
-        #expect(throws: ToolSchemaConsistencyCheck.Failure.self) {
+        #expect(throws: ToolDefinitionError.self) {
             try ToolSchemaConsistencyCheck.verify(input: weatherInput, decodesInto: StrictArgs.self)
         }
     }

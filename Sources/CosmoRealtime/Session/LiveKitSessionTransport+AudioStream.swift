@@ -31,11 +31,11 @@ extension LiveKitSessionTransport {
     /// track. Two consequences the caller sees: the local audio track is
     /// published if it was not already, and the device microphone is
     /// silenced for the duration so the agent hears exactly the pushed
-    /// buffers. Throws ``RealtimeSessionError/audioPublishAlreadyActive``
+    /// buffers. Throws ``SessionStateError``
     /// while a stream is already running.
     func startAudioStream() async throws {
         guard let room else {
-            throw RealtimeSessionError.notConnected
+            throw SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.")
         }
         try claimAudioStreamSlot(micWasPublishing: room.localParticipant.isMicrophoneEnabled())
         do {
@@ -56,7 +56,7 @@ extension LiveKitSessionTransport {
         let mixer = AudioManager.shared.mixer
         try audioStreamLock.withLock { current in
             guard current == nil else {
-                throw RealtimeSessionError.audioPublishAlreadyActive
+                throw SessionStateError(code: .audioPublishAlreadyActive, message: "An audio stream is already active on this session; remove it before starting another.")
             }
             current = AudioStreamState(
                 restoreMicVolume: mixer.micVolume, micWasPublishing: micWasPublishing

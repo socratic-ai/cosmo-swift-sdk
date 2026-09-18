@@ -39,32 +39,17 @@ public struct Cancellable: Sendable {
 
 // MARK: - Errors
 
-public enum RealtimeError: Error, LocalizedError, Equatable {
-    /// REST session-start failed.
-    case sessionStartFailed(message: String)
-    case notConnected
-    /// A session start was attempted on a handle whose previous start already
-    /// succeeded. A session is single-shot — start a new one to reconnect.
-    case alreadyConnected
-    /// A connect exceeded the configured timeout waiting for either the REST
-    /// session-start or the LiveKit ``Room/connect`` to return. Surfaced as a
-    /// distinct case so callers can branch on "wedged backend / signaling" vs
-    /// other failure modes.
-    case connectTimeout
-    case screenShareUnavailable
-    /// A caller passed a payload that would violate a wire-protocol
-    /// invariant (e.g. attempting to wrap an ``envelope-chunk`` inside
-    /// another envelope). The associated message names the violation.
-    case invalidWirePayload(String)
-
-    public var errorDescription: String? {
-        switch self {
-        case .sessionStartFailed(let message): return "Session start failed: \(message)"
-        case .notConnected: return "The realtime session is not connected."
-        case .alreadyConnected: return "The realtime session already started (or is in flight); start a new session to reconnect."
-        case .connectTimeout: return "Realtime connect exceeded the configured timeout."
-        case .screenShareUnavailable: return "Screen share is unavailable: LiveKit BufferCapturer could not be created."
-        case .invalidWirePayload(let detail): return "Invalid wire payload: \(detail)"
-        }
-    }
+/// Base for every error this SDK throws, so `catch let error as RealtimeError`
+/// catches them as one family and can read `message` off any of them. Mirrors
+/// Python's `cosmo_ai.RealtimeError` and TypeScript's `RealtimeError`.
+///
+/// A catch target, not a conformance point: the SDK's own errors adopt it and
+/// nothing outside needs to. Conforming your own type would make it catchable
+/// as an error this SDK threw, which is the opposite of what the family is
+/// for, and leaves it to be updated when a requirement is added.
+public protocol RealtimeError: Error {
+    /// Human-readable explanation, for logs and display. Written for a person
+    /// and free to change between releases — branch on the `code` the thrown
+    /// error carries, never on this.
+    var message: String { get }
 }

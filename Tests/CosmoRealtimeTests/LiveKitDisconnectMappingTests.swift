@@ -2,7 +2,7 @@ import LiveKit
 import Testing
 @testable import CosmoRealtime
 
-/// Pins the LiveKit disconnect-type → ``RealtimeSession/EndReason``
+/// Pins the LiveKit disconnect-type → ``RealtimeSession/CloseReason``
 /// classification. Deliberate server closes become ``serverEnded``; everything
 /// else stays ``transportError`` — the cross-SDK mapping.
 @Suite struct LiveKitDisconnectMappingTests {

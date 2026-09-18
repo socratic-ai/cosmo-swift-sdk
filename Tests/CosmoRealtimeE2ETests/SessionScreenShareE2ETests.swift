@@ -16,18 +16,14 @@ import Testing
 struct SessionScreenShareE2ETests {
 
     private func makeTransport() -> LiveKitSessionTransport {
-        LiveKitSessionTransport(
-            options: RealtimeClient.Options(
-                apiKey: "n/a"
-            )
-        )
+        LiveKitSessionTransport(client: RealtimeClient(apiKey: "n/a"))
     }
 
     @Test("startScreenShare without a connected room throws .notConnected")
     func startWithoutRoomThrows() async throws {
         let transport = makeTransport()
 
-        await #expect(throws: RealtimeSessionError.notConnected) {
+        await #expect(throws: SessionStateError(code: .notConnected, message: "RealtimeSession is not connected.")) {
             try await transport.startScreenShare()
         }
         #expect(!(await transport._testScreenShareLockHasValue()), "guard must reject before installing state")

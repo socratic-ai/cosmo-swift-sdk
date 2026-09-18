@@ -10,16 +10,26 @@ import Foundation
 /// runtime. ``Codable`` so callers can encode their own types into a
 /// ``JSONValue`` via ``JSONEncoder``.
 public enum JSONValue: Sendable, Equatable {
+    /// A JSON string.
     case string(String)
+    /// A whole number. Decoded in preference to ``double(_:)`` so a round
+    /// number survives a round trip as an integer.
     case int(Int)
+    /// A fractional number.
     case double(Double)
+    /// A JSON boolean.
     case bool(Bool)
+    /// JSON `null`. Distinct from an absent key.
     case null
+    /// A JSON array.
     case array([JSONValue])
+    /// A JSON object.
     case object([String: JSONValue])
 }
 
 extension JSONValue: Codable {
+    /// Decodes any JSON value, preferring `Int` over `Double` for a whole
+    /// number.
     public init(from decoder: Decoder) throws {
         let c = try decoder.singleValueContainer()
         if c.decodeNil() { self = .null; return }
@@ -32,6 +42,7 @@ extension JSONValue: Codable {
         throw DecodingError.dataCorruptedError(in: c, debugDescription: "Unsupported JSON value")
     }
 
+    /// Encodes the value back to JSON in its original shape.
     public func encode(to encoder: Encoder) throws {
         var c = encoder.singleValueContainer()
         switch self {
